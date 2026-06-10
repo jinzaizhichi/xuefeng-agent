@@ -10,18 +10,14 @@ if not exist ".env" (
 )
 
 echo Checking dependencies...
-python -c "import openai" >/dev/null 2>&1
+C:\Users\17625\AppData\Local\Programs\Python\Python312\python.exe -c "import openai" 2>nul
 if errorlevel 1 (
     echo Installing required packages...
-    python -m pip install openai pywin32 -q
+    C:\Users\17625\AppData\Local\Programs\Python\Python312\python.exe -m pip install openai pywin32 -q
     echo Done.
 )
 
 echo Starting...
-python agent.py
-if errorlevel 1 (
-    echo.
-    echo If you see 'python' not found, install Python 3.10+ from python.org
-)
+C:\Users\17625\AppData\Local\Programs\Python\Python312\python.exe agent.py
 echo.
 pause
