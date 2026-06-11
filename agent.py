@@ -420,11 +420,27 @@ class GaokaoAdvisor:
                     school = school_match[-1]  # 降级用最后一个
             rank = int(rank_match.group(1)) if rank_match else None
 
+            # 提取专业关键词
+            major_keywords = ['计算机','软件','电气','机械','土木','临床','口腔','法学','会计','金融',
+                            '物联网','人工智能','大数据','电子','通信','自动化','材料','化工','生物',
+                            '医学','护理','师范','英语','日语','新闻','设计','美术','音乐','体育',
+                            '汉语言','思政','马克思','数学','物理','化学','历史','地理']
+            major_kw = None
+            for kw in major_keywords:
+                if kw in user_msg:
+                    major_kw = kw
+                    break
+
             if prov or school:
-                real_data = query_real_data(prov, school, None, rank, limit=15)
+                real_data = query_real_data(prov, school, major_kw, rank, limit=30)
+                if not real_data and school:
+                    real_data = query_real_data(None, school, major_kw, rank, limit=30)
+                if not real_data and school and major_kw:
+                    # 放宽：不按专业筛选
+                    real_data = query_real_data(prov, school, None, rank, limit=30)
                 if not real_data and school:
                     # 跨省搜索——可能别的省有这个学校的数据
-                    real_data = query_real_data(None, school, None, rank, limit=15)
+                    real_data = query_real_data(None, school, None, rank, limit=50)
                 if real_data:
                     data_prov = real_data[0].get('province', prov) if real_data else prov
                     lines = [f"【真实录取数据 · {data_prov}】"]
@@ -439,7 +455,7 @@ class GaokaoAdvisor:
                     search_hint = '\n'.join(lines[:20])
                     if prov and prov not in str(data_prov):
                         search_hint += f'\n\n⚠ 注意：以上为{data_prov}省数据（{prov}暂无该学校数据），位次参考需根据各省差异调整。'
-                    search_hint += '\n\n【铁律】上面是真实录取数据。你必须用它来回答，不准用自己脑子里的数字。数据里有什么就说什么，没有的就说没有。'
+                    search_hint += '\n\n【铁律·死命令】你脑子里的任何数字都不可靠。上面这些才是真实的录取数据。你的任务是把这些数据用大白话告诉用户。不准编造任何不在上面的数字。不准说\"大概XX万\"。数据里的位次是多少就说多少。如果数据和你记忆冲突，以这里的数据为准。'
                     messages.append({"role": "system", "content": search_hint})
                     search_results = "real_data_used"
 
