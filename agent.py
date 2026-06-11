@@ -457,9 +457,11 @@ class GaokaoAdvisor:
                     search_hint = '\n'.join(lines[:20])
                     if prov and prov not in str(data_prov):
                         search_hint += f'\n\n⚠ 注意：以上为{data_prov}省数据（{prov}暂无该学校数据），位次参考需根据各省差异调整。'
-                    # 格式化数据摘要，强制插入回复开头
+                    # 格式化数据摘要 + 跨省警告
                     data_summary = '\n'.join(lines[:15])
-                    messages.append({"role": "user", "content": f"【以下是真实数据，你的回复必须以这段数据开头，然后分析：】\n{data_summary}\n\n请先一字不改地列出上面所有数据，再进行分析。不准编造任何上面没有的数字。"})
+                    if prov and prov not in str(data_prov):
+                        data_summary += f'\n\n⚠ {prov}暂无该学校录取数据，以上为{data_prov}省数据，仅作参考。'
+                    messages.append({"role": "user", "content": f"【以下是真实数据，如果有跨省警告，回复时必须说明。】\n{data_summary}\n\n逐条报数字，不准编。"})
                     search_results = "real_data_used"
                     try:
                         print(f'\n  [数据] {lines[0]} ({len(lines)-1}条)')
