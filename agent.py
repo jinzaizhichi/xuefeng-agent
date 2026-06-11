@@ -257,11 +257,10 @@ def is_consultation_intent(msg):
     return any(kw in msg for kw in keywords)
 
 # ── 搜索功能 ─────────────────────────────────────────
-def web_search(query, max_results=3):
-    """搜索并获取网页内容。先用百度搜索找URL，再抓取页面文字。"""
+def web_search(query, max_results=5):
+    """搜索并抓取网页。百度搜索→提取URL→抓取正文。"""
     results = []
     try:
-        # Step 1: 百度搜索获取结果链接
         url = SEARCH_ENGINE + urllib.parse.quote(query)
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -269,41 +268,37 @@ def web_search(query, max_results=3):
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
 
-        # Step 2: 提取搜索结果URL（尝试多种匹配模式）
         urls = re.findall(r'href="(https?://[^"]+)"', html)
-        # 过滤掉百度自己的链接，保留真实网站
-        valid_urls = [u for u in urls if 'baidu.com' not in u and len(u) > 30][:max_results]
+        valid_urls = [u for u in urls if 'baidu.com' not in u and len(u) > 30][:max_results + 3]
 
-        # Step 3: 抓取每个结果页面的文字内容
         for target_url in valid_urls:
+            if len(results) >= max_results:
+                break
             try:
                 page_req = urllib.request.Request(target_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                 })
                 with urllib.request.urlopen(page_req, timeout=8) as page_resp:
                     page_html = page_resp.read().decode("utf-8", errors="ignore")
-                # 去掉所有标签，提取可见文字
                 clean = re.sub(r'<script[^>]*>.*?</script>', '', page_html, flags=re.DOTALL)
                 clean = re.sub(r'<style[^>]*>.*?</style>', '', clean, flags=re.DOTALL)
                 clean = re.sub(r'<[^>]+>', ' ', clean)
                 clean = re.sub(r'\s+', ' ', clean).strip()
-                # 取有效内容（100-500字）
                 if len(clean) > 100:
-                    results.append(clean[:500] + "...")
+                    results.append(clean[:600])
             except:
                 continue
 
         if not results:
-            # Step 4: 降级——只取百度摘要
             snippets = re.findall(r'<span class="content-right_[^"]*">(.*?)</span>', html)
             for s in snippets[:max_results]:
                 clean = re.sub(r'<[^>]+>', '', s).strip()
                 if len(clean) > 20:
                     results.append(clean)
 
-        return results if results else ["(搜索无结果，建议手动查询官方渠道)"]
+        return results if results else [f"(搜索无结果)"]
     except Exception as e:
-        return [f"(搜索暂时不可用: {e})"]
+        return [f"(搜索异常: {e})"]
 
 def should_search(msg):
     """判断是否需要联网搜索——更积极触发。"""
@@ -471,11 +466,22 @@ class GaokaoAdvisor:
         web_info = None
         if CONFIG["enable_search"] and should_search(user_msg):
             search_query = user_msg[:120]
-            web_results = web_search(search_query)
-            if web_results:
-                web_info = "\n".join(f"· {r[:200]}" for r in web_results[:5] if len(r) > 20)
+            # 搜两轮：精准+宽泛
+            web_results1 = web_search(search_query + " 录取 位次", max_results=5)
+            web_results2 = web_search(search_query + " 分数线", max_results=5) if "位次" not in search_query else []
+            all_web = (web_results1 or []) + (web_results2 or [])
+            # 去重
+            seen = set()
+            unique_web = []
+            for r in all_web:
+                key = r[:50]
+                if key not in seen and len(r) > 30:
+                    seen.add(key)
+                    unique_web.append(r)
+            if unique_web:
+                web_info = "\n".join(f"· {r[:250]}" for r in unique_web[:8])
                 if web_info:
-                    messages.append({"role": "system", "content": f"【网上搜索到的信息】\n{web_info}\n\n你是分析师。根据这些网上信息和你的知识，给出分析。必须明确标注'根据网上公开信息'。不准把网上的模糊信息说成确定数字。"})
+                    messages.append({"role": "system", "content": f"【网上搜索到的信息·综合{len(unique_web)}条】\n{web_info}\n\n你根据以上多条网上信息交叉验证，给出综合分析。必须明确标注'根据网上公开信息综合分析'。不准把模糊信息说成确定数字。如果多条信息矛盾，要指出。"})
                     if not search_results:
                         search_results = "web_only"
 
