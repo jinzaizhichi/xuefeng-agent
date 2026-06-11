@@ -29,40 +29,53 @@ try:
 except:
     HAS_REAL_DATA = False
 
-def query_real_data(province, school_keyword=None, max_rank=None, limit=20):
-    """查询真实录取数据库"""
+def query_real_data(province=None, school_keyword=None, major_keyword=None, max_rank=None, limit=20):
+    """查询真实录取数据库 — 修复版"""
     if not HAS_REAL_DATA:
         return None
     try:
         curs = REAL_DB.cursor()
-        if school_keyword and max_rank:
-            curs.execute("""
-                SELECT school, major, score, rank, quota FROM admission
-                WHERE province LIKE ? AND school LIKE ? AND rank >= ?
-                ORDER BY rank ASC LIMIT ?
-            """, (f'%{province}%', f'%{school_keyword}%', max_rank, limit))
-        elif school_keyword:
-            curs.execute("""
-                SELECT school, major, score, rank, quota FROM admission
-                WHERE province LIKE ? AND school LIKE ?
-                ORDER BY rank ASC LIMIT ?
-            """, (f'%{province}%', f'%{school_keyword}%', limit))
-        elif max_rank:
-            curs.execute("""
-                SELECT school, major, score, rank, quota FROM admission
-                WHERE province LIKE ? AND rank >= ? AND rank <= ?
-                ORDER BY rank ASC LIMIT ?
-            """, (f'%{province}%', max_rank, max_rank + 50000, limit))
-        else:
+        conditions = []
+        params = []
+
+        # 省份模糊匹配
+        if province:
+            conditions.append("province LIKE ?")
+            params.append(f'%{province}%')
+
+        # 学校模糊匹配
+        if school_keyword:
+            conditions.append("school LIKE ?")
+            params.append(f'%{school_keyword}%')
+
+        # 专业模糊匹配
+        if major_keyword:
+            conditions.append("major LIKE ?")
+            params.append(f'%{major_keyword}%')
+
+        # 位次范围
+        if max_rank:
+            conditions.append("rank >= ? AND rank <= ?")
+            params.append(max_rank)
+            params.append(max_rank + 80000)
+
+        # 至少要有省份或学校
+        if not conditions:
             return None
+
+        where = " AND ".join(conditions)
+        query_sql = f"SELECT school, major, score, rank, quota, province FROM admission WHERE {where} ORDER BY rank ASC LIMIT ?"
+        params.append(limit)
+
+        curs.execute(query_sql, params)
         rows = curs.fetchall()
         if rows:
             return [
-                {'school': r[0], 'major': r[1], 'score': r[2], 'rank': r[3], 'quota': r[4]}
+                {'school': r[0], 'major': r[1], 'score': r[2], 'rank': r[3], 'quota': r[4], 'province': r[5]}
                 for r in rows
             ]
         return None
-    except:
+    except Exception as e:
         return None
 
 def read_clipboard():
@@ -389,10 +402,14 @@ class GaokaoAdvisor:
             school = school_match[0] if school_match else None
             rank = int(rank_match.group(1)) if rank_match else None
 
-            if prov:
-                real_data = query_real_data(prov, school, rank, limit=15)
+            if prov or school:
+                real_data = query_real_data(prov, school, None, rank, limit=15)
+                if not real_data and school:
+                    # 跨省搜索——可能别的省有这个学校的数据
+                    real_data = query_real_data(None, school, None, rank, limit=15)
                 if real_data:
-                    lines = [f"【真实录取数据 · {prov}】"]
+                    data_prov = real_data[0].get('province', prov) if real_data else prov
+                    lines = [f"【真实录取数据 · {data_prov}】"]
                     for d in real_data:
                         extras = []
                         if d['score']: extras.append(f"最低{d['score']}分")
@@ -402,6 +419,8 @@ class GaokaoAdvisor:
                         major_str = f" · {d['major']}" if d['major'] and d['major'] != d['school'] else ''
                         lines.append(f"· {d['school']}{major_str} — {extra_str}")
                     search_hint = '\n'.join(lines[:20])
+                    if prov and prov not in str(data_prov):
+                        search_hint += f'\n\n⚠ 注意：以上为{data_prov}省数据（{prov}暂无该学校数据），位次参考需根据各省差异调整。'
                     search_hint += '\n\n⚠ 以上为2024年真实录取数据，请以位次为核心参考。'
                     messages.append({"role": "system", "content": search_hint})
                     search_results = "real_data_used"
