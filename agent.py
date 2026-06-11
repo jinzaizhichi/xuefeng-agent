@@ -399,15 +399,18 @@ class GaokaoAdvisor:
 
             # 省份优先从槽位取
             prov = prov_match[0] if prov_match else SLOTS.get('province', {}).get('value', '')
-            # 学校名：取最长匹配，清理前导动词
+            # 学校名：取包含大学/学院的最长连续中文片段
             school = None
             if school_match:
-                # 选最长的一个
-                school = max(school_match, key=len)
-                # 去掉前导的常见动词/介词
-                school = re.sub(r'^.{1,2}(?:想报|想去|想上|想学|报考|报|去|上|读)', '', school)
-                if len(school) < 4:
-                    school = school_match[0]  # 降级
+                # 取最后一个匹配（通常最靠近学校名本身）
+                # 并将相邻的匹配合并（北京科技大学+天津学院=北京科技大学天津学院）
+                school = school_match[-1]
+                if len(school_match) >= 2:
+                    prev = school_match[-2]
+                    # 如果上一个匹配紧挨着最后一个，合并
+                    combined = prev + school
+                    if combined in user_msg.replace(' ', ''):
+                        school = combined
             rank = int(rank_match.group(1)) if rank_match else None
 
             if prov or school:
