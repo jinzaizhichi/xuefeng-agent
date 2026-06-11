@@ -249,8 +249,8 @@ def build_all(progress_callback=None):
             if year == 2024 and '25年' in root:
                 year = 2025
 
-            # 只处理投档/录取/分数数据
-            if not any(kw in fname for kw in ['投档', '录取', '分数线', '分数']):
+            # 处理投档/录取/分数/一分一段/专业分数线等所有高考数据
+            if not any(kw in fname for kw in ['投档', '录取', '分数线', '分数', '一分一段', '分段表', '专业分数线', '招生计划']):
                 continue
 
             results = parse_any_excel(filepath)
