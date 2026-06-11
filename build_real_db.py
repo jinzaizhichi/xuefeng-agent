@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""一键构建全国高考录取数据库 — 从桌面高考志愿填报文件夹"""
+
+import os, sys, re, sqlite3, xlrd, openpyxl, time
+
+DATA_DIR = r'E:\桌面\高考志愿填报'
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'admission_data.db')
+
+def parse_any_excel(filepath):
+    """智能解析任意Excel文件，自动识别表头和数据行"""
+    results = []
+    try:
+        # 判断文件格式
+        if filepath.endswith('.xls'):
+            try:
+                wb = xlrd.open_workbook(filepath)
+                ws = wb.sheet_by_index(0)
+                nrows, ncols = ws.nrows, ws.ncols
+                def get_val(r, c):
+                    v = ws.cell_value(r, c)
+                    if isinstance(v, float) and v == int(v):
+                        return str(int(v))
+                    return str(v).strip() if v else ''
+            except:
+                # 可能是.xlsx伪装成.xls
+                return parse_xlsx(filepath)
+        else:
+            return parse_xlsx(filepath)
+
+        # 自动找表头行（包含"院校"或"学校"或"投档"或"分数"的行）
+        header_row = 0
+        for r in range(min(30, nrows)):
+            row_text = ' '.join([get_val(r, c) for c in range(min(10, ncols))])
+            if any(kw in row_text for kw in ['院校', '学校', '投档', '分数', '位次', '计划']):
+                header_row = r
+                break
+
+        # 自动定位列
+        headers = [get_val(header_row, c) for c in range(min(10, ncols))]
+        col_map = {}
+        for i, h in enumerate(headers):
+            hl = h.lower()
+            if any(kw in hl for kw in ['院校', '学校', '大学']):
+                col_map['school'] = i
+            if any(kw in hl for kw in ['专业', '名称']):
+                if 'major' not in col_map:
+                    col_map['major'] = i
+            if any(kw in hl for kw in ['分', '投档']):
+                if 'score' not in col_map:
+                    col_map['score'] = i
+            if any(kw in hl for kw in ['位次', '名次', '排名']):
+                col_map['rank'] = i
+            if any(kw in hl for kw in ['计划', '人数', '招生']):
+                col_map['quota'] = i
+
+        # 如果没找到school列，尝试用第一列
+        if 'school' not in col_map:
+            col_map['school'] = 0
+
+        # 遍历数据行
+        for r in range(header_row + 1, nrows):
+            school = get_val(r, col_map.get('school', 0))
+            if not school or len(school) < 2:
+                continue
+            # 跳过明显的非数据行
+            if school.startswith('注') or school.startswith('说明') or '合计' in school:
+                continue
+
+            major = get_val(r, col_map['major']) if 'major' in col_map else ''
+            score_str = get_val(r, col_map['score']) if 'score' in col_map else ''
+            rank_str = get_val(r, col_map['rank']) if 'rank' in col_map else ''
+            quota_str = get_val(r, col_map['quota']) if 'quota' in col_map else ''
+
+            # 清理数字
+            try:
+                score = int(float(score_str)) if score_str else None
+            except:
+                score = None
+            try:
+                rank = int(float(rank_str)) if rank_str else None
+            except:
+                rank = None
+            try:
+                quota = int(float(quota_str)) if quota_str else None
+            except:
+                quota = None
+
+            # 清理学校名和专业名
+            school = re.sub(r'^\d+\s*', '', school)  # 去前导数字
+            school = re.sub(r'[（(][^)）]*[)）]$', '', school)  # 去末尾括号
+            major = re.sub(r'^\d+\s*', '', major)
+
+            if school and (score or rank):
+                results.append({
+                    'school': school.strip(),
+                    'major': major.strip() if major else '',
+                    'score': score,
+                    'rank': rank,
+                    'quota': quota,
+                })
+
+        wb.release_resources() if hasattr(wb, 'release_resources') else None
+        return results
+    except Exception as e:
+        return []
+
+def parse_xlsx(filepath):
+    """解析.xlsx文件"""
+    results = []
+    try:
+        wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+        ws = wb.active
+        nrows, ncols = ws.max_row, ws.max_column
+        def get_val(r, c):
+            v = ws.cell(r, c).value
+            if v is None:
+                return ''
+            if isinstance(v, float) and v == int(v):
+                return str(int(v))
+            return str(v).strip()
+
+        # Same logic as above
+        header_row = 0
+        for r in range(min(30, nrows)):
+            row_text = ' '.join([get_val(r, c) for c in range(1, min(10, ncols+1))])
+            if any(kw in row_text for kw in ['院校', '学校', '投档', '分数', '位次', '计划']):
+                header_row = r
+                break
+
+        headers = [get_val(header_row, c) for c in range(1, min(10, ncols+1))]
+        col_map = {}
+        for i, h in enumerate(headers):
+            i += 1
+            hl = h.lower()
+            if any(kw in hl for kw in ['院校', '学校', '大学']):
+                if 'school' not in col_map:
+                    col_map['school'] = i
+            if any(kw in hl for kw in ['专业', '名称']):
+                if 'major' not in col_map:
+                    col_map['major'] = i
+            if any(kw in hl for kw in ['分', '投档', '控制线']):
+                if 'score' not in col_map:
+                    col_map['score'] = i
+            if any(kw in hl for kw in ['位次', '名次', '排名']):
+                if 'rank' not in col_map:
+                    col_map['rank'] = i
+            if any(kw in hl for kw in ['计划', '人数']):
+                col_map['quota'] = i
+
+        if 'school' not in col_map:
+            col_map['school'] = 1
+
+        for r in range(header_row + 1, nrows + 1):
+            school = get_val(r, col_map.get('school', 1))
+            if not school or len(school) < 2:
+                continue
+            if school.startswith('注') or school.startswith('说明'):
+                continue
+
+            major = get_val(r, col_map['major']) if 'major' in col_map else ''
+            score_str = get_val(r, col_map['score']) if 'score' in col_map else ''
+            rank_str = get_val(r, col_map['rank']) if 'rank' in col_map else ''
+            quota_str = get_val(r, col_map['quota']) if 'quota' in col_map else ''
+
+            try:
+                score = int(float(score_str)) if score_str else None
+            except:
+                score = None
+            try:
+                rank = int(float(rank_str)) if rank_str else None
+            except:
+                rank = None
+            try:
+                quota = int(float(quota_str)) if quota_str else None
+            except:
+                quota = None
+
+            school = re.sub(r'^\d+\s*', '', school)
+            school = re.sub(r'[（(][^)）]*[)）]$', '', school)
+            major = re.sub(r'^\d+\s*', '', major)
+
+            if school and (score or rank):
+                results.append({
+                    'school': school.strip(),
+                    'major': major.strip() if major else '',
+                    'score': score,
+                    'rank': rank,
+                    'quota': quota,
+                })
+
+        wb.close()
+        return results
+    except Exception as e:
+        return []
+
+def build_all(progress_callback=None):
+    """构建完整数据库"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DROP TABLE IF EXISTS admission")
+    conn.execute("""
+        CREATE TABLE admission (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            province TEXT,
+            year INTEGER,
+            school TEXT,
+            major TEXT,
+            score INTEGER,
+            rank INTEGER,
+            quota INTEGER,
+            source_file TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX idx_province ON admission(province)")
+    conn.execute("CREATE INDEX idx_school ON admission(school)")
+    conn.execute("CREATE INDEX idx_score ON admission(score)")
+    conn.execute("CREATE INDEX idx_rank ON admission(rank)")
+    conn.execute("CREATE INDEX idx_major ON admission(major)")
+
+    total = 0
+    files_processed = 0
+
+    for root, dirs, files in os.walk(DATA_DIR):
+        for fname in files:
+            if not fname.endswith(('.xls', '.xlsx')):
+                continue
+            if fname.startswith('~'):
+                continue
+
+            filepath = os.path.join(root, fname)
+
+            # 推断省份和年份
+            province = os.path.basename(root)
+            year = 2024  # 默认2024
+            if '25年' in root or '2025' in fname:
+                year = 2025
+            elif '26年' in root or '2026' in fname:
+                year = 2026
+
+            # 只处理投档/录取/分数数据
+            if not any(kw in fname for kw in ['投档', '录取', '分数线', '分数']):
+                continue
+
+            results = parse_any_excel(filepath)
+            for r in results:
+                if r['school'] and (r['score'] or r['rank']):
+                    conn.execute(
+                        "INSERT INTO admission(province, year, school, major, score, rank, quota, source_file) VALUES (?,?,?,?,?,?,?,?)",
+                        (province, year, r['school'], r['major'], r['score'], r['rank'], r['quota'], fname)
+                    )
+                    total += 1
+
+            files_processed += 1
+            if files_processed % 50 == 0:
+                print(f'  {files_processed} files, {total} records...')
+
+    conn.commit()
+
+    # 统计
+    prov_count = conn.execute("SELECT COUNT(DISTINCT province) FROM admission").fetchone()[0]
+    school_count = conn.execute("SELECT COUNT(DISTINCT school) FROM admission").fetchone()[0]
+    major_count = conn.execute("SELECT COUNT(DISTINCT major) FROM admission WHERE major != ''").fetchone()[0]
+    has_rank = conn.execute("SELECT COUNT(*) FROM admission WHERE rank IS NOT NULL").fetchone()[0]
+    has_score = conn.execute("SELECT COUNT(*) FROM admission WHERE score IS NOT NULL").fetchone()[0]
+
+    conn.close()
+
+    print(f'\n===== 数据库构建完成 =====')
+    print(f'文件处理: {files_processed}')
+    print(f'总记录数: {total}')
+    print(f'覆盖省份: {prov_count}')
+    print(f'覆盖学校: {school_count}')
+    print(f'覆盖专业: {major_count}')
+    print(f'有位次数据: {has_rank}')
+    print(f'有分数数据: {has_score}')
+
+    return total
+
+if __name__ == "__main__":
+    t0 = time.time()
+    build_all()
+    print(f'\n耗时: {time.time()-t0:.0f}秒')
+    print(f'数据库: {DB_PATH}')

@@ -17,6 +17,54 @@ try:
 except ImportError:
     HAS_DATA_MODULE = False
 
+# 真实录取数据库
+try:
+    import sqlite3
+    REAL_DB_PATH = os.path.join(HERE, 'admission_data.db')
+    if os.path.exists(REAL_DB_PATH):
+        REAL_DB = sqlite3.connect(REAL_DB_PATH)
+        HAS_REAL_DATA = True
+    else:
+        HAS_REAL_DATA = False
+except:
+    HAS_REAL_DATA = False
+
+def query_real_data(province, school_keyword=None, max_rank=None, limit=20):
+    """查询真实录取数据库"""
+    if not HAS_REAL_DATA:
+        return None
+    try:
+        curs = REAL_DB.cursor()
+        if school_keyword and max_rank:
+            curs.execute("""
+                SELECT school, major, score, rank, quota FROM admission
+                WHERE province LIKE ? AND school LIKE ? AND rank >= ?
+                ORDER BY rank ASC LIMIT ?
+            """, (f'%{province}%', f'%{school_keyword}%', max_rank, limit))
+        elif school_keyword:
+            curs.execute("""
+                SELECT school, major, score, rank, quota FROM admission
+                WHERE province LIKE ? AND school LIKE ?
+                ORDER BY rank ASC LIMIT ?
+            """, (f'%{province}%', f'%{school_keyword}%', limit))
+        elif max_rank:
+            curs.execute("""
+                SELECT school, major, score, rank, quota FROM admission
+                WHERE province LIKE ? AND rank >= ? AND rank <= ?
+                ORDER BY rank ASC LIMIT ?
+            """, (f'%{province}%', max_rank, max_rank + 50000, limit))
+        else:
+            return None
+        rows = curs.fetchall()
+        if rows:
+            return [
+                {'school': r[0], 'major': r[1], 'score': r[2], 'rank': r[3], 'quota': r[4]}
+                for r in rows
+            ]
+        return None
+    except:
+        return None
+
 def read_clipboard():
     """读取 Windows 剪贴板文本。"""
     try:
@@ -329,9 +377,37 @@ class GaokaoAdvisor:
             hint = f"(系统自动识别到: {', '.join(updates)}。请在回复中确认并追问缺失信息。)"
             messages.append({"role": "system", "content": hint})
 
-        # 搜索（更积极 + 真实数据）
+        # 第一步：查真实数据库（优先级最高）
         search_results = None
-        if CONFIG["enable_search"] and should_search(user_msg):
+        if HAS_REAL_DATA:
+            school_match = re.findall(r'[一-鿿]{2,6}(?:大学|学院)', user_msg)
+            prov_match = re.findall(r'(北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|广西|海南|四川|贵州|云南|陕西|甘肃|青海|西藏|宁夏|新疆|内蒙古)', user_msg)
+            rank_match = re.search(r'(\d{4,7})\s*[位名]', user_msg)
+
+            # 省份优先从槽位取
+            prov = prov_match[0] if prov_match else SLOTS.get('province', {}).get('value', '')
+            school = school_match[0] if school_match else None
+            rank = int(rank_match.group(1)) if rank_match else None
+
+            if prov:
+                real_data = query_real_data(prov, school, rank, limit=15)
+                if real_data:
+                    lines = [f"【真实录取数据 · {prov}】"]
+                    for d in real_data:
+                        extras = []
+                        if d['score']: extras.append(f"最低{d['score']}分")
+                        if d['rank']: extras.append(f"位次{d['rank']}")
+                        if d['quota']: extras.append(f"招{d['quota']}人")
+                        extra_str = ' / '.join(extras)
+                        major_str = f" · {d['major']}" if d['major'] and d['major'] != d['school'] else ''
+                        lines.append(f"· {d['school']}{major_str} — {extra_str}")
+                    search_hint = '\n'.join(lines[:20])
+                    search_hint += '\n\n⚠ 以上为2024年真实录取数据，请以位次为核心参考。'
+                    messages.append({"role": "system", "content": search_hint})
+                    search_results = "real_data_used"
+
+        # 第二步：网上搜索（降级）
+        if not search_results and CONFIG["enable_search"] and should_search(user_msg):
             # 尝试用数据模块搜真实录取数据
             school_match = re.findall(r'[一-鿿]{2,6}(?:大学|学院)', user_msg)
             prov_match = re.findall(r'(北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|广西|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|西藏|宁夏|新疆)', user_msg)
