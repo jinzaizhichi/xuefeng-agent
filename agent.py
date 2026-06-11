@@ -101,7 +101,7 @@ HAS_REAL_DATA = False
 REAL_DB = None
 try:
     import sqlite3 as _sql
-    _DB_PATH = os.path.join(HERE, 'admission_data.db')
+    _DB_PATH = os.path.join(HERE, 'admission_clean.db')
     if os.path.exists(_DB_PATH):
         REAL_DB = _sql.connect(_DB_PATH)
         HAS_REAL_DATA = True

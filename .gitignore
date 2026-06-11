@@ -21,3 +21,5 @@ gaokao_cache.db
 .DS_Store
 Thumbs.db
 admission_data.db
+*.db
+build_log.txt
