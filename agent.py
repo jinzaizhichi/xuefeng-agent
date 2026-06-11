@@ -102,6 +102,13 @@ REAL_DB = None
 try:
     import sqlite3 as _sql
     _DB_PATH = os.path.join(HERE, 'admission_clean.db')
+    _GZ_PATH = os.path.join(HERE, 'admission_clean.db.gz')
+    # 自动解压
+    if not os.path.exists(_DB_PATH) and os.path.exists(_GZ_PATH):
+        import gzip, shutil
+        with gzip.open(_GZ_PATH, 'rb') as gz:
+            with open(_DB_PATH, 'wb') as f:
+                shutil.copyfileobj(gz, f)
     if os.path.exists(_DB_PATH):
         REAL_DB = _sql.connect(_DB_PATH)
         HAS_REAL_DATA = True
