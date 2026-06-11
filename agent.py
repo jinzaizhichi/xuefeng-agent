@@ -455,10 +455,11 @@ class GaokaoAdvisor:
                     search_hint = '\n'.join(lines[:20])
                     if prov and prov not in str(data_prov):
                         search_hint += f'\n\n⚠ 注意：以上为{data_prov}省数据（{prov}暂无该学校数据），位次参考需根据各省差异调整。'
-                                        search_hint += '\n\n【死命令】你是分析师不是数据源。逐条报上面数字，不准编。不准说大概。没有就说没有。'
-                    messages.append({"role": "system", "content": search_hint})
+                    # 格式化数据摘要
+                    data_summary = '\n'.join(lines[:15])
+                    # 把真实数据作为 user 消息塞进去（比 system 消息更难忽视）
+                    messages.append({"role": "user", "content": f"（系统查询结果，你必须逐字引用这些数字：）\n{data_summary}"})
                     search_results = "real_data_used"
-                    # 也打印到终端让用户直接看到数据
                     try:
                         print(f'\n  [数据] {lines[0]} ({len(lines)-1}条)')
                     except: pass
