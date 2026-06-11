@@ -52,14 +52,14 @@ def query_real_data(province=None, school_keyword=None, major_keyword=None, max_
             return None
 
         where = " AND ".join(conditions)
-        query_sql = f"SELECT school, major, score, rank, quota, province FROM admission WHERE {where} ORDER BY rank ASC LIMIT ?"
+        query_sql = f"SELECT school, major, score, rank, quota, province, year FROM admission WHERE {where} ORDER BY year DESC, rank ASC LIMIT ?"
         params.append(limit)
 
         curs.execute(query_sql, params)
         rows = curs.fetchall()
         if rows:
             return [
-                {'school': r[0], 'major': r[1], 'score': r[2], 'rank': r[3], 'quota': r[4], 'province': r[5]}
+                {'school': r[0], 'major': r[1], 'score': r[2], 'rank': r[3], 'quota': r[4], 'province': r[5], 'year': r[6]}
                 for r in rows
             ]
         return None
@@ -447,7 +447,8 @@ class GaokaoAdvisor:
                     lines = [f"【真实录取数据 · {data_prov}】"]
                     for d in real_data:
                         extras = []
-                        if d['score']: extras.append(f"最低{d['score']}分")
+                        if d.get('year'): extras.append(f"{d['year']}年")
+                        if d['score'] and d['score'] > 1: extras.append(f"最低{d['score']}分")
                         if d['rank']: extras.append(f"位次{d['rank']}")
                         if d['quota']: extras.append(f"招{d['quota']}人")
                         extra_str = ' / '.join(extras)
