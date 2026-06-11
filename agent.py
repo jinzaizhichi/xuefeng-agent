@@ -399,18 +399,25 @@ class GaokaoAdvisor:
 
             # 省份优先从槽位取
             prov = prov_match[0] if prov_match else SLOTS.get('province', {}).get('value', '')
-            # 学校名：取包含大学/学院的最长连续中文片段
+            # 学校名：用数据库模糊匹配，不靠正则猜
             school = None
-            if school_match:
-                # 取最后一个匹配（通常最靠近学校名本身）
-                # 并将相邻的匹配合并（北京科技大学+天津学院=北京科技大学天津学院）
-                school = school_match[-1]
-                if len(school_match) >= 2:
-                    prev = school_match[-2]
-                    # 如果上一个匹配紧挨着最后一个，合并
-                    combined = prev + school
-                    if combined in user_msg.replace(' ', ''):
-                        school = combined
+            if school_match and HAS_REAL_DATA:
+                # 尝试每个可能的学校名匹配，取数据库里能找到的那个
+                for candidate in reversed(school_match):  # 从最后一个开始试
+                    test = query_real_data(None, candidate, None, None, 1)
+                    if test:
+                        school = candidate
+                        break
+                if not school:
+                    # 尝试合并相邻匹配
+                    for i in range(len(school_match)-1, 0, -1):
+                        combined = school_match[i-1] + school_match[i]
+                        test = query_real_data(None, combined, None, None, 1)
+                        if test:
+                            school = combined
+                            break
+                if not school:
+                    school = school_match[-1]  # 降级用最后一个
             rank = int(rank_match.group(1)) if rank_match else None
 
             if prov or school:
