@@ -393,34 +393,35 @@ class GaokaoAdvisor:
         # 第一步：查真实数据库（优先级最高）
         search_results = None
         if HAS_REAL_DATA:
-            school_match = re.findall(r'[一-鿿]{2,12}(?:大学|学院)', user_msg)
+            # 省份从用户消息和槽位提取
             prov_match = re.findall(r'(北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|广西|海南|四川|贵州|云南|陕西|甘肃|青海|西藏|宁夏|新疆|内蒙古)', user_msg)
+            # 学校名：直接从数据库搜——把消息中的每个2-8字片段扔进DB匹配
+            school = None
+            if HAS_REAL_DATA:
+                # 提取所有可能的大学/学院关键词
+                for m in re.finditer(r'(?:大学|学院)', user_msg):
+                    end = m.end()
+                    for start in range(max(0, end-12), end-1):
+                        candidate = user_msg[start:end]
+                        if len(candidate) >= 3 and any('一' <= c <= '鿿' for c in candidate):
+                            test = query_real_data(None, candidate, None, None, 1)
+                            if test:
+                                school = candidate
+                                break
+                    if school:
+                        break
+                # 降级：用纯正则
+                if not school:
+                    fallback = re.findall(r'[一-鿿]{2,8}(?:大学|学院)', user_msg)
+                    if fallback:
+                        school = fallback[-1]  # 取最后一个
             rank_match = re.search(r'(\d{4,7})\s*[位名]', user_msg)
 
             # 省份优先从槽位取
             prov = prov_match[0] if prov_match else SLOTS.get('province', {}).get('value', '')
-            # 学校名：用数据库模糊匹配，不靠正则猜
-            school = None
-            if school_match and HAS_REAL_DATA:
-                # 尝试每个可能的学校名匹配，取数据库里能找到的那个
-                for candidate in reversed(school_match):  # 从最后一个开始试
-                    test = query_real_data(None, candidate, None, None, 1)
-                    if test:
-                        school = candidate
-                        break
-                if not school:
-                    # 尝试合并相邻匹配
-                    for i in range(len(school_match)-1, 0, -1):
-                        combined = school_match[i-1] + school_match[i]
-                        test = query_real_data(None, combined, None, None, 1)
-                        if test:
-                            school = combined
-                            break
-                if not school:
-                    school = school_match[-1]  # 降级用最后一个
             rank = int(rank_match.group(1)) if rank_match else None
 
-            # 提取专业关键词
+            # 专业关键词
             major_keywords = ['计算机','软件','电气','机械','土木','临床','口腔','法学','会计','金融',
                             '物联网','人工智能','大数据','电子','通信','自动化','材料','化工','生物',
                             '医学','护理','师范','英语','日语','新闻','设计','美术','音乐','体育',
@@ -436,9 +437,9 @@ class GaokaoAdvisor:
                 if not real_data and school:
                     real_data = query_real_data(None, school, major_kw, rank, limit=30)
                 if not real_data and school and major_kw:
-                    # 放宽：不按专业筛选
                     real_data = query_real_data(prov, school, None, rank, limit=30)
                 if not real_data and school:
+                    real_data = query_real_data(None, school, None, rank, limit=30)
                     # 跨省搜索——可能别的省有这个学校的数据
                     real_data = query_real_data(None, school, None, rank, limit=50)
                 if real_data:
@@ -455,10 +456,9 @@ class GaokaoAdvisor:
                     search_hint = '\n'.join(lines[:20])
                     if prov and prov not in str(data_prov):
                         search_hint += f'\n\n⚠ 注意：以上为{data_prov}省数据（{prov}暂无该学校数据），位次参考需根据各省差异调整。'
-                    # 格式化数据摘要
+                    # 格式化数据摘要，强制插入回复开头
                     data_summary = '\n'.join(lines[:15])
-                    # 把真实数据作为 user 消息塞进去（比 system 消息更难忽视）
-                    messages.append({"role": "user", "content": f"（系统查询结果，你必须逐字引用这些数字：）\n{data_summary}"})
+                    messages.append({"role": "user", "content": f"【以下是真实数据，你的回复必须以这段数据开头，然后分析：】\n{data_summary}\n\n请先一字不改地列出上面所有数据，再进行分析。不准编造任何上面没有的数字。"})
                     search_results = "real_data_used"
                     try:
                         print(f'\n  [数据] {lines[0]} ({len(lines)-1}条)')
@@ -467,7 +467,7 @@ class GaokaoAdvisor:
         # 第二步：网上搜索（仅在没有真实数据时）
         if not search_results and CONFIG["enable_search"] and should_search(user_msg):
             # 尝试用数据模块搜真实录取数据
-            school_match = re.findall(r'[一-鿿]{2,12}(?:大学|学院)', user_msg)
+            school_match = re.findall(r'[一-鿿]{2,8}(?:大学|学院)', user_msg)
             prov_match = re.findall(r'(北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|广西|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|西藏|宁夏|新疆)', user_msg)
 
             if school_match and prov_match and HAS_DATA_MODULE:
@@ -505,8 +505,13 @@ class GaokaoAdvisor:
         except Exception as e:
             reply = f"出错了：{e}\n请检查 API 配置（base_url, api_key, model 是否正确）。"
 
-        # 清理格式：去掉模型不听 prompt 时残留的 markdown
+        # 清理格式
         reply = cleanup_format(reply)
+
+        # 如果有真实数据，直接插入回复开头——LLM 不可靠，数据先行
+        if search_results == "real_data_used":
+            search_hint_clean = re.sub(r'【[^】]+】', '', search_hint)[:800]
+            reply = f"[真实录取数据]\n{search_hint_clean}\n\n[AI分析]\n{reply}"
 
         # 保存对话历史
         self.conversation.append({"role": "user", "content": user_msg})
