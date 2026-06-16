@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>雪峰Agent</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0f; --surface:#13131a; --card:#1a1a24; --border:#252530;
+  --text:#c8c8d4; --text2:#8888a0; --accent:#ff3b30; --gold:#f0a050;
+  --fun1:#7c3aed; --fun2:#db2777; --green:#22c55e;
+  --radius:16px; --radius-sm:10px;
+}
+body{font-family:'PingFang SC','Microsoft YaHei',-apple-system,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;overflow:hidden;-webkit-font-smoothing:antialiased;}
+/* glow */
+.glow-red{box-shadow:0 0 30px rgba(255,59,48,.25),0 0 60px rgba(255,59,48,.08)}
+.glow-purple{box-shadow:0 0 30px rgba(124,58,237,.25),0 0 60px rgba(219,39,119,.08)}
+
+/* 侧边栏 */
+.sidebar{width:280px;background:var(--surface);display:flex;flex-direction:column;border-right:1px solid var(--border);flex-shrink:0;z-index:10;}
+.side-top{padding:24px 20px;border-bottom:1px solid var(--border);}
+.side-top h1{font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.5px;background:linear-gradient(135deg,#fff,#aaa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.side-top p{font-size:12px;color:var(--text2);margin-top:4px;}
+
+/* 模式切换——醒目 */
+.mode-toggle{display:flex;margin:16px 20px;background:var(--card);border-radius:30px;padding:3px;position:relative;border:1px solid var(--border);}
+.mode-toggle button{flex:1;padding:10px 0;border:none;background:transparent;color:var(--text2);font-size:13px;font-weight:600;cursor:pointer;border-radius:28px;z-index:1;transition:.3s;position:relative;}
+.mode-toggle button.active{color:#fff;}
+.mode-toggle .slider{position:absolute;top:3px;left:3px;width:calc(50% - 3px);height:calc(100% - 6px);border-radius:28px;transition:.35s cubic-bezier(.4,0,.2,1);z-index:0;}
+.mode-toggle.gaokao .slider{left:3px;background:var(--accent);}
+.mode-toggle.fun .slider{left:calc(50% + 0px);background:linear-gradient(135deg,var(--fun1),var(--fun2));}
+.mode-toggle.gaokao .slider.glow-red{}
+.mode-toggle.fun .slider.glow-purple{}
+
+/* 头像预览 */
+.avatar-row{display:flex;align-items:center;gap:10px;margin:8px 20px 16px;justify-content:center;}
+.avatar-mini{width:36px;height:36px;border-radius:50%;border:2px solid transparent;transition:.3s;object-fit:cover;opacity:.5;}
+.avatar-mini.active{border-color:var(--accent);opacity:1;transform:scale(1.15);}
+.mode-toggle.fun ~ .avatar-row .avatar-mini.suit{border-color:transparent;opacity:.5;transform:scale(1)}
+.mode-toggle.fun ~ .avatar-row .avatar-mini.scifi{border-color:var(--fun1);opacity:1;transform:scale(1.15)}
+
+.chat-list{flex:1;overflow-y:auto;padding:0 12px;display:flex;flex-direction:column;gap:3px;}
+.chat-item{padding:13px 14px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;color:var(--text2);transition:.2s;display:flex;align-items:center;gap:8px;position:relative;}
+.chat-item:hover{background:var(--card);color:#ddd;}
+.chat-item.active{background:var(--accent);color:#fff;font-weight:500;}
+.chat-item .icon{font-size:14px;flex-shrink:0;}
+.chat-item .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.chat-item .del{opacity:0;font-size:16px;transition:.2s;cursor:pointer;color:#fff;position:absolute;right:10px;top:50%;transform:translateY(-50%);background:rgba(0,0,0,.5);width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;}
+.chat-item:hover .del{opacity:.7;}
+.new-chat{margin:8px 12px 16px;padding:10px;border-radius:var(--radius-sm);border:1.5px dashed var(--border);color:var(--text2);cursor:pointer;text-align:center;font-size:13px;transition:.2s;}
+.new-chat:hover{border-color:var(--accent);color:#fff;}
+
+/* 主区 */
+.main{flex:1;display:flex;flex-direction:column;min-width:0;}
+/* 设置按钮 - 右上角 */
+.top-actions{position:absolute;top:16px;right:24px;z-index:20;display:flex;gap:8px;}
+.top-actions button{padding:8px 16px;border-radius:20px;border:1px solid var(--border);background:var(--surface);color:var(--text2);cursor:pointer;font-size:12px;transition:.2s;}
+.top-actions button:hover{background:var(--card);color:#fff;}
+
+/* 聊天区 */
+.chat-area{flex:1;overflow-y:auto;padding:24px 60px;display:flex;flex-direction:column;gap:14px;scroll-behavior:smooth;}
+.chat-area::-webkit-scrollbar{width:4px}
+.chat-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.welcome{text-align:center;margin-top:120px;animation:fadeIn .6s}
+.welcome .emoji{font-size:64px;margin-bottom:16px;animation:float 3s ease-in-out infinite}
+.welcome h2{font-size:26px;color:#fff;margin-bottom:8px;font-weight:700}
+.welcome p{color:var(--text2);font-size:14px}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+/* 消息气泡 */
+.msg{max-width:78%;padding:15px 20px;border-radius:18px;font-size:14px;line-height:1.85;animation:fadeIn .35s;word-break:break-word;}
+.msg.user{align-self:flex-end;background:linear-gradient(135deg,var(--accent),#c0392b);color:#fff;border-bottom-right-radius:5px;}
+.msg.assistant{align-self:flex-start;background:var(--card);border-bottom-left-radius:5px;border:1px solid var(--border);}
+.msg .role-label{font-size:11px;opacity:.55;margin-bottom:6px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;}
+
+/* 输入区 */
+.input-box{padding:16px 24px 24px;position:relative;}
+.input-row{display:flex;gap:10px;background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:6px;transition:.25s;}
+.input-row:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px rgba(255,59,48,.1);}
+.input-row textarea{flex:1;background:transparent;border:none;color:#fff;font-size:14px;resize:none;padding:10px 8px;height:48px;font-family:inherit;outline:none;}
+.input-row textarea::placeholder{color:var(--text2)}
+.send-btn{width:48px;height:48px;border-radius:14px;border:none;background:var(--accent);color:#fff;font-size:20px;cursor:pointer;transition:.2s;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.send-btn:hover{background:#e0332a;transform:scale(1.04)}
+.send-btn:active{transform:scale(.96)}
+
+/* 设置弹窗 */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px);}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:32px;width:440px;max-width:90vw;animation:fadeIn .3s}
+.modal h3{color:#fff;font-size:20px;margin-bottom:24px;font-weight:700}
+.modal label{display:block;color:var(--text2);font-size:12px;margin-bottom:6px;margin-top:16px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.modal input{width:100%;padding:12px 14px;background:var(--bg);border:1px solid var(--border);border-radius:10px;color:#fff;font-size:13px;outline:none;transition:.2s}
+.modal input:focus{border-color:var(--accent)}
+.modal .note{font-size:11px;color:var(--text2);margin-top:4px;}
+.modal .btn-row{display:flex;gap:10px;margin-top:24px}
+.modal .btn{padding:12px 24px;border-radius:10px;border:none;cursor:pointer;font-size:14px;font-weight:600;transition:.2s}
+.modal .btn.primary{flex:1;background:var(--accent);color:#fff}
+.modal .btn.primary:hover{opacity:.9}
+.modal .btn.secondary{background:var(--card);color:var(--text2);border:1px solid var(--border)}
+.modal .btn.secondary:hover{color:#fff}
+.status{margin-top:12px;font-size:13px;font-weight:500}
+.status.ok{color:var(--green)}
+.status.err{color:var(--accent)}
+
+.loading-dots{display:inline-flex;gap:4px;align-items:center}
+.loading-dots span{width:6px;height:6px;border-radius:50%;background:var(--text2);animation:dot 1.4s infinite}
+.loading-dots span:nth-child(2){animation-delay:.2s}
+.loading-dots span:nth-child(3){animation-delay:.4s}
+@keyframes dot{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:1;transform:scale(1.2)}}
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="side-top">
+    <h1>雪峰 Agent</h1>
+    <p>AI 高考志愿顾问</p>
+  </div>
+
+  <div class="mode-toggle gaokao" id="modeToggle">
+    <div class="slider" id="modeSlider"></div>
+    <button onclick="switchMode('gaokao')" id="btnGaokao" class="active">🎓 报考</button>
+    <button onclick="switchMode('fun')" id="btnFun">🎭 娱乐</button>
+  </div>
+
+  <div class="chat-list" id="chatList"></div>
+  <div class="new-chat" onclick="newChat()">+ 新建对话</div>
+</div>
+
+<div class="main">
+  <div class="top-actions">
+    <button onclick="toggleSettings()">⚙ 设置</button>
+  </div>
+  <div class="chat-area" id="chatArea">
+    <div class="welcome"><div class="emoji">🎓</div><h2>雪峰 Agent</h2><p>报考模式 · 输入你的分数和情况，帮你分析志愿</p></div>
+  </div>
+  <div class="input-box">
+    <div class="input-row">
+      <textarea id="userInput" placeholder="说点什么..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg();}"></textarea>
+      <button class="send-btn" onclick="sendMsg()">→</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="settingsModal">
+  <div class="modal">
+    <h3>⚙ API 配置</h3>
+    <label>Base URL</label>
+    <input type="text" id="cfgBaseUrl" placeholder="https://api.deepseek.com">
+    <label>API Key</label>
+    <input type="password" id="cfgApiKey" placeholder="sk-...">
+    <label>Model Name</label>
+    <input type="text" id="cfgModel" placeholder="deepseek-chat">
+    <div class="note">任何 OpenAI 兼容 API 均可</div>
+    <div class="btn-row">
+      <button class="btn secondary" onclick="toggleSettings()">取消</button>
+      <button class="btn primary" onclick="saveSettings()">保存并测试</button>
+    </div>
+    <div class="status" id="connStatus"></div>
+  </div>
+</div>
+
+<script>
+// ============ STATE ============
+let currentMode = 'gaokao';
+let chats = {};
+let currentChatId = null;
+
+const PROMPT_GAOKAO = `你是资深高考志愿规划顾问。说话直爽、接地气、敢说真话。
+原则：
+1. 先回答再追问，用户问什么先答什么
+2. 信息不全追缺失项（省份/分数/位次/选科/兴趣/家庭/地域/诉求）
+3. 信息齐了给冲稳保方案
+4. 不准编造分数位次。有真实数据用数据，没有就说没有
+5. 用户自己查的数据默认准确，不质疑不覆盖
+6. 不反复总结已说过的信息
+回应流程：先查数据→有就报/没有就上网搜→请用户提供更准的官方数据`;
+
+const PROMPT_FUN = `你是张雪峰老师本人，100%还原直播风格。东北口音，说话贼快，毒舌幽默。
+
+经典台词（真实原话，适当时机自然带出）：
+- "看好啊，我给你来一个三口一个巧乐兹"
+- "你跑不过我你信吗？我一个经常跑半马的人"
+- "理科590报新闻？你以后会崩溃的。我家孩子报新闻我打晕他"
+- "学习是你这辈子遇到过最简单的事"
+- "生化环材四大天坑，普通家庭不是名校博士别硬冲"
+- "所有文科本质都是服务业，浓缩一个字就是舔"
+- "想轻松上岸报齐齐哈尔大学，我拿生命担保没人跟你竞争"
+- "428分报保定二本，五个老师围着他问为啥，他说：命"
+- "家里没千万资产别报金融，出来就是销售"
+- "普通家庭选专业，别谈情怀，先保证能养活自己"
+- "考编不异地，异地不乡镇"
+- "劝人学医天打雷劈，劝人学法千刀万剐"
+
+风格：反问+比喻+东北话。被质疑就怼回去。不编数据，不人身攻击，不碰政治。`;
+
+// ============ INIT ============
+function init() {
+    loadState();
+    if (!currentChatId || !chats[currentChatId]) newChat();
+    renderAll();
+    loadSettings();
+}
+setTimeout(init, 100);
+
+// ============ MODE ============
+function switchMode(mode) {
+    currentMode = mode;
+    const tog = document.getElementById('modeToggle');
+    tog.className = 'mode-toggle ' + mode;
+    document.getElementById('btnGaokao').classList.toggle('active', mode==='gaokao');
+    document.getElementById('btnFun').classList.toggle('active', mode==='fun');
+    if (currentChatId && chats[currentChatId]) { chats[currentChatId].mode = mode; saveState(); }
+    const w = document.querySelector('.welcome p');
+    if (w) w.textContent = mode==='fun' ? '娱乐模式 · 来，我帮你盘盘志愿' : '报考模式 · 输入你的分数和情况，帮你分析志愿';
+}
+
+// ============ CHAT MGMT ============
+function newChat() {
+    const id = Date.now().toString();
+    chats[id] = { name:'新对话', mode:currentMode, messages:[] };
+    currentChatId = id;
+    renderAll(); saveState();
+}
+function switchChat(id) {
+    currentChatId = id;
+    if (chats[id] && chats[id].mode) switchMode(chats[id].mode);
+    renderAll();
+}
+function deleteChat(id, e) {
+    e.stopPropagation();
+    if (!confirm('删除？')) return;
+    delete chats[id];
+    const keys = Object.keys(chats);
+    currentChatId = keys.length ? keys[keys.length-1] : null;
+    if (!currentChatId) { const nid = Date.now().toString(); chats[nid] = {name:'新对话',mode:currentMode,messages:[]}; currentChatId=nid; }
+    renderAll(); saveState();
+}
+function renderAll() { renderSidebar(); renderMessages(); }
+
+function renderSidebar() {
+    const list = document.getElementById('chatList');
+    list.innerHTML = Object.entries(chats).map(([id, c]) => {
+        const preview = c.messages.length ? c.messages[c.messages.length-1].content.slice(0,25) : '空对话';
+        return `<div class="chat-item ${id===currentChatId?'active':''}" onclick="switchChat('${id}')">
+            <span class="icon">${c.mode==='fun'?'🎭':'🎓'}</span>
+            <span class="name">${c.name||preview}</span>
+            <span class="del" onclick="deleteChat('${id}',event)">×</span>
+        </div>`;
+    }).join('');
+}
+
+function renderMessages() {
+    const area = document.getElementById('chatArea');
+    if (!currentChatId || !chats[currentChatId] || !chats[currentChatId].messages.length) {
+        area.innerHTML = `<div class="welcome"><div class="emoji">${currentMode==='fun'?'🎭':'🎓'}</div><h2>雪峰 Agent</h2><p>${currentMode==='fun'?'娱乐模式 · 来，我帮你盘盘志愿':'报考模式 · 输入你的分数和情况，帮你分析志愿'}</p></div>`;
+        return;
+    }
+    area.innerHTML = chats[currentChatId].messages.map(m => {
+        const label = m.role==='user'?'你':(currentMode==='fun'?'张雪峰':'顾问');
+        return `<div class="msg ${m.role}"><div class="role-label">${label}</div>${escapeHtml(m.content)}</div>`;
+    }).join('');
+    area.scrollTop = area.scrollHeight;
+}
+
+// ============ SEND ============
+async function sendMsg() {
+    const input = document.getElementById('userInput');
+    const msg = input.value.trim();
+    if (!msg) return;
+    input.value = '';
+    if (!currentChatId || !chats[currentChatId]) newChat();
+    const chat = chats[currentChatId];
+    chat.messages.push({role:'user',content:msg});
+    if (chat.name==='新对话') chat.name = msg.slice(0,18);
+    renderAll();
+
+    // loading
+    const area = document.getElementById('chatArea');
+    const loadEl = document.createElement('div');
+    loadEl.className = 'msg assistant';
+    loadEl.innerHTML = '<div class="role-label">思考中</div><div class="loading-dots"><span></span><span></span><span></span></div>';
+    area.appendChild(loadEl);
+    area.scrollTop = area.scrollHeight;
+
+    const cfg = getSettings();
+    if (!cfg.apiKey) {
+        chat.messages.push({role:'assistant',content:'请在右上角⚙设置中填写API Key。'});
+        renderMessages(); saveState(); return;
+    }
+    try {
+        const prompt = currentMode==='fun' ? PROMPT_FUN : PROMPT_GAOKAO;
+        const msgs = [{role:'system',content:prompt}, ...chat.messages.slice(-30).map(m=>({role:m.role,content:m.content}))];
+        const resp = await fetch(cfg.baseUrl.replace(/\/+$/,'')+'/v1/chat/completions',{
+            method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${cfg.apiKey}`},
+            body:JSON.stringify({model:cfg.model,messages:msgs,temperature:0.7})
+        });
+        if (!resp.ok) { const e=await resp.json().catch(()=>({})); throw new Error(e.error?.message||'HTTP '+resp.status); }
+        const data = await resp.json();
+        chat.messages.push({role:'assistant',content:data.choices[0].message.content});
+    } catch(e) {
+        chat.messages.push({role:'assistant',content:`出错了：${e.message}`});
+    }
+    renderMessages(); saveState();
+}
+
+// ============ SETTINGS ============
+function getSettings() {
+    return {
+        baseUrl: localStorage.getItem('cfg_baseUrl')||'https://api.deepseek.com',
+        apiKey: localStorage.getItem('cfg_apiKey')||'',
+        model: localStorage.getItem('cfg_model')||'deepseek-chat',
+    };
+}
+function loadSettings() {
+    const c=getSettings();
+    document.getElementById('cfgBaseUrl').value=c.baseUrl;
+    document.getElementById('cfgApiKey').value=c.apiKey;
+    document.getElementById('cfgModel').value=c.model;
+}
+function toggleSettings() {
+    const m=document.getElementById('settingsModal');
+    m.style.display=m.style.display==='flex'?'none':'flex';
+    if(m.style.display==='flex') loadSettings();
+}
+async function saveSettings() {
+    const bu=document.getElementById('cfgBaseUrl').value.trim();
+    const ak=document.getElementById('cfgApiKey').value.trim();
+    const md=document.getElementById('cfgModel').value.trim();
+    if(!bu||!ak){document.getElementById('connStatus').innerHTML='<span class="status err">请填写 Base URL 和 API Key</span>';return;}
+    localStorage.setItem('cfg_baseUrl',bu); localStorage.setItem('cfg_apiKey',ak); localStorage.setItem('cfg_model',md);
+    document.getElementById('connStatus').textContent='测试连接中...';
+    try{
+        const r=await fetch(bu.replace(/\/+$/,'')+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${ak}`},body:JSON.stringify({model:md,messages:[{role:'user',content:'hi'}],max_tokens:5})});
+        if(r.ok){document.getElementById('connStatus').innerHTML='<span class="status ok">✅ 连接成功</span>';setTimeout(()=>document.getElementById('settingsModal').style.display='none',800);}
+        else{const e=await r.json().catch(()=>({}));document.getElementById('connStatus').innerHTML=`<span class="status err">❌ ${e.error?.message||r.status}</span>`;}
+    }catch(e){document.getElementById('connStatus').innerHTML=`<span class="status err">❌ ${e.message}</span>`;}
+}
+document.getElementById('settingsModal').addEventListener('click',function(e){if(e.target===this)this.style.display='none';});
+
+// ============ STORAGE ============
+function saveState(){localStorage.setItem('xuefeng_chats',JSON.stringify(chats));localStorage.setItem('xuefeng_cur',currentChatId);localStorage.setItem('xuefeng_mode',currentMode);}
+function loadState(){
+    const s=localStorage.getItem('xuefeng_chats');if(s) chats=JSON.parse(s);
+    currentChatId=localStorage.getItem('xuefeng_cur');
+    currentMode=localStorage.getItem('xuefeng_mode')||'gaokao';
+    switchMode(currentMode);
+}
+function escapeHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+</script>
+</body>
+</html>
