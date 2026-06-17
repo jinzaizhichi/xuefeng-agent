@@ -32,36 +32,17 @@ def query_db(province=None, school=None, major=None, limit=50):
     return [{'province':r[0],'year':r[1],'school_name':r[2],'major_name':r[3],'score':r[4],'rank':r[5]} for r in rows]
 
 def web_search(query, n=5):
-    try:
-        url = "https://www.baidu.com/s?wd=" + urllib.parse.quote(query)
-        req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-        results = []
-        for u in re.findall(r'href="(https?://[^"]+)"', html):
-            if any(s in u for s in ['baidu.com','.css','.js','.png','.jpg']): continue
-            if len(u) < 60: continue
-            try:
-                pr = urllib.request.Request(u, headers={"User-Agent":"Mozilla/5.0"})
-                with urllib.request.urlopen(pr, timeout=6) as prr:
-                    ph = prr.read().decode("utf-8", errors="ignore")
-                clean = re.sub(r'<script[^>]*>.*?</script>','',ph,flags=re.DOTALL)
-                clean = re.sub(r'<style[^>]*>.*?</style>','',clean,flags=re.DOTALL)
-                clean = re.sub(r'<[^>]+>',' ',clean)
-                clean = re.sub(r'\s+',' ',clean).strip()
-                if len(clean) > 100: results.append(clean[:400])
-                if len(results) >= n: break
-            except: continue
-        return results if results else ["搜索无结果"]
-    except Exception as e:
-        return [f"搜索失败:{e}"]
+    # Baidu scraping no longer works (blocked). Return hint to use Tavily.
+    return ["搜索无结果。请在前端API设置中填入Tavily Key以启用联网搜索（tavily.com免费注册）。"]
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, data, code=200):
         self.send_response(code)
         self.send_header('Content-Type','application/json;charset=utf-8')
         self.send_header('Access-Control-Allow-Origin','*')
-        self.send_header('Cache-Control','no-cache')
+        self.send_header('Cache-Control','no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Pragma','no-cache')
+        self.send_header('Expires','0')
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
 
@@ -86,30 +67,76 @@ class Handler(BaseHTTPRequestHandler):
             keyword = qs.get('keyword',[''])[0]
             try: rank = int(qs.get('rank',['0'])[0])
             except: rank = 0
-            if prov and rank > 0:
+            try: score = int(qs.get('score',['0'])[0])
+            except: score = 0
+            print(f"[RECOMMEND] prov={prov} rank={rank} score={score} kw={keyword[:30] if keyword else 'none'}")
+            if prov and (rank > 0 or score > 0):
                 conn = sqlite3.connect(DB_PATH)
-                base = "province LIKE ? AND rank>0"
+                base = "province LIKE ? AND (score>0 OR rank>0)"
                 bp = [f'%{prov}%']
                 if major: base += " AND major_name LIKE ?"; bp.append(f'%{major}%')
                 if keyword:
                     kws = keyword.split(',')
                     kw_conds = []
                     for kw in kws:
-                        kw_conds.append("major_name LIKE ?")
-                        bp.append(f'%{kw}%')
+                        kw_conds.append("(major_name LIKE ? OR school_name LIKE ?)")
+                        bp.append(f'%{kw}%'); bp.append(f'%{kw}%')
                     base += " AND (" + " OR ".join(kw_conds) + ")"
-                chong = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
-                    conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank<? AND rank>=? ORDER BY rank ASC LIMIT 50",
-                    bp+[rank, max(1,int(rank*0.7))]).fetchall()]
-                wen = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
-                    conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank>=? AND rank<=? ORDER BY rank ASC LIMIT 50",
-                    bp+[rank, int(rank*1.3)]).fetchall()]
-                bao = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
-                    conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank>? AND rank<=? ORDER BY rank ASC LIMIT 50",
-                    bp+[int(rank*1.3), int(rank*1.6)]).fetchall()]
+
+                chong = []; wen = []; bao = []
+
+                # Try rank-based first, fall back to score-based
+                if rank > 0:
+                    chong = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank>0 AND rank<? AND rank>=? ORDER BY rank ASC LIMIT 50",
+                        bp+[rank, max(1,int(rank*0.85))]).fetchall()]
+                    wen = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank>0 AND rank>=? AND rank<=? ORDER BY rank ASC LIMIT 50",
+                        bp+[rank, int(rank*1.3)]).fetchall()]
+                    bao = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank>0 AND rank>? AND rank<=? ORDER BY rank ASC LIMIT 50",
+                        bp+[int(rank*1.3), int(rank*1.6)]).fetchall()]
+
+                # If no results with keyword, retry without keyword (broader search)
+                if not (chong or wen or bao) and keyword:
+                    chong = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE province LIKE ? AND rank>0 AND rank<? AND rank>=? ORDER BY rank ASC LIMIT 50",
+                        [f'%{prov}%', rank, max(1,int(rank*0.85))]).fetchall()]
+                    wen = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE province LIKE ? AND rank>0 AND rank>=? AND rank<=? ORDER BY rank ASC LIMIT 50",
+                        [f'%{prov}%', rank, int(rank*1.3)]).fetchall()]
+                    bao = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE province LIKE ? AND rank>0 AND rank>? AND rank<=? ORDER BY rank ASC LIMIT 50",
+                        [f'%{prov}%', int(rank*1.3), int(rank*1.6)]).fetchall()]
+
+                # If rank query returned nothing, try score-based
+                if not (chong or wen or bao) and score > 0:
+                    # First try with keyword
+                    chong = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND score>? AND score<=? ORDER BY score DESC LIMIT 80",
+                        bp+[score, score+35]).fetchall()]
+                    wen = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND score>=? AND score<=? ORDER BY score ASC LIMIT 50",
+                        bp+[score-25, score+35]).fetchall()]
+                    bao = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                        conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND score>=? AND score<? ORDER BY score ASC LIMIT 50",
+                        bp+[score-50, score-25]).fetchall()]
+                    # If keyword filtered everything, retry without keyword
+                    if not (chong or wen or bao):
+                        base2 = "province LIKE ? AND score>0"
+                        bp2 = [f'%{prov}%']
+                        chong = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                            conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base2} AND score>? AND score<=? ORDER BY score DESC LIMIT 80",
+                            bp2+[score, score+40]).fetchall()]
+                        wen = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                            conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base2} AND score>=? AND score<=? ORDER BY score ASC LIMIT 50",
+                            bp2+[score-15, score+15]).fetchall()]
+                        bao = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                            conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base2} AND score>=? AND score<? ORDER BY score ASC LIMIT 50",
+                            bp2+[score-40, score-15]).fetchall()]
                 conn.close()
-                return self._send({'rank':rank,'chong':chong,'wen':wen,'bao':bao})
-            return self._send({'error':'need province and rank'},400)
+                return self._send({'rank':rank,'score':score,'chong':chong,'wen':wen,'bao':bao})
+            return self._send({'error':'need province and rank or score'},400)
         if self.path.startswith('/search'):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             q = qs.get('q',[''])[0]
@@ -131,13 +158,15 @@ class Handler(BaseHTTPRequestHandler):
         # Serve the main UI page
         self.send_response(200)
         self.send_header('Content-Type','text/html;charset=utf-8')
-        self.send_header('Cache-Control','no-cache')
+        self.send_header('Cache-Control','no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Pragma','no-cache')
+        self.send_header('Expires','0')
         self.end_headers()
         self.wfile.write(HTML_PAGE.encode('utf-8'))
 
     def log_message(self, format, *args):
         msg = format%args if args else format
-        if '/recommend' in msg or '/query' in msg or '/ping' in msg:
+        if '/recommend' in msg or '/query' in msg or '/ping' in msg or '/search' in msg:
             print(f"[REQ] {msg}")
 
 # ========== 完整的 HTML 页面（内嵌 JS）==========
@@ -190,11 +219,11 @@ body{font:14px/1.7 'PingFang SC','Microsoft YaHei',sans-serif;background:var(--b
 <label>Base URL</label><input id="sUrl" placeholder="https://api.deepseek.com">
 <label>API Key</label><input type="password" id="sKey" placeholder="sk-...">
 <label>Model</label><input id="sModel" placeholder="deepseek-chat">
-<label>Tavily Key <span style="color:var(--t2);font-size:10px">(可选)</span></label><input type="password" id="sTav" placeholder="tvly-...">
+<label>Tavily Key <span style="color:var(--red);font-size:11px;font-weight:600">(选填，但强烈推荐)</span></label><input type="password" id="sTav" placeholder="tvly-..."><div style="background:var(--side);border-radius:6px;padding:8px 10px;margin:4px 0 8px;font-size:11px;line-height:1.6;color:var(--txt)"><b>做什么的？</b> AI联网搜索引擎，比百度精准10倍，专为AI设计。<br><b>为什么推荐？</b> 填了之后Agent会自动搜索最新分数线、学校环境、王牌专业、就业薪资——回答质量天差地别。<br><b>要钱吗？</b> 免费额度每月1000次，正常使用完全够。<br><b>怎么获取？</b> 打开 <a href=\"https://tavily.com\" target=\"_blank\" style=\"color:var(--red);font-weight:600\">tavily.com</a> → 点 Get Started（Google/GitHub账号直接登）→ 复制 tvly- 开头的Key → 粘贴到这里。<br><b>不填行不行？</b> 行，但联网搜索基本废了（百度反爬），建议花1分钟注册。</div>
 <div class="btns"><button id="closeSetBtn">取消</button><button class="ok" id="testBtn">保存并测试</button></div><div class="st" id="st"></div></div></div>
 <script>
 var chats,curId,mode;try{chats=JSON.parse(localStorage.getItem('xf_chats')||'{}');}catch(e){chats={};localStorage.removeItem('xf_chats');}curId=localStorage.getItem('xf_cur')||'';mode=localStorage.getItem('xf_mode')||'gaokao';
-var PG="你是资深高考志愿规划师，风格直爽接地气，像张雪峰一样。\n\n【核心规则】\n1. 省份志愿政策感知：\n   专业+院校(浙江80个/山东96个/河北96个/重庆96个/辽宁112个)→推荐至少30-50所\n   院校+专业组(江苏40/广东45/湖北45/湖南45/福建40/北京30/天津50/上海24/海南24)→推荐填满80%+\n   老高考(河南/四川/陕西等)→推荐8-12所，每所填满6个专业\n2. 冲稳保比例：冲20%稳50%保30%，保底至少3个\n3. 数据使用铁律：\n   - [真实录取数据]里的每条都来自考试院官方，逐条引用标注省份年份位次分数\n   - [联网搜索]数据标注\"据网上公开信息，仅供参考\"\n   - 数据库和联网搜索都没数据的学校，直接说\"暂无该校数据\"，绝对禁止编造任何分数和位次数字！\n4. 专业过滤铁律（极其重要！）：\n   - 用户说了想学什么专业，就只推荐这些专业或相关方向\n   - 用户明确排斥的专业（如生化环材/土木/护理等）一律过滤掉，提都不要提\n   - DB数据里混了不相关的专业（如用户要计算机结果DB返回了中医学），你必须手动筛掉\n   - 优先推荐专业对口的学校，即使它的位次稍远，也比专业不对口的学校强\n5. 普通家庭优先技术类(计算机/软件/电子/电气/自动化/机械)。无公检法资源慎选法学\n6. 生化环材土木护理等天坑专业主动提醒用户避开\n\n【回答结构】\n第1步:确认省份政策→\"你是XX省考生，XX模式，可填N个志愿...\"\n第2步:冲的学校——只推荐专业对口的，逐一列出DB数据或联网数据，没数据的跳过\n第3步:稳的学校——同上，优先专业对口的\n第4步:保的学校——同上\n第5步:补充建议\n\n重要:不要只给3-5所学校。DB数据的学校优先推荐。没有真实数据的学校不要瞎编分数位次。";
+var PG="你是资深高考志愿规划师，风格直爽接地气，像张雪峰一样。\n\n【核心规则】\n1. 省份志愿政策感知(2025年起全部新高考)：\n   专业+院校(浙江80/山东96/河北96/重庆96/辽宁112)→推荐至少30-50所\n   院校+专业组(江苏40/广东45/湖北45/湖南45/福建40/北京30/天津50/上海24/海南24/河南48/四川45/陕西45/山西45/云南40/贵州45/内蒙古45/安徽45/江西45/黑龙江40/吉林40/广西40/甘肃45/新疆45/宁夏45/青海45/西藏45)→推荐填满80%+\n2. 冲稳保比例：冲20%稳50%保30%，保底至少3个\n3. 用户提供的数据（省份、分数、位次、选科、家庭背景等）默认准确，不质疑、不反问（你确定吗）。即使和数据库对不上，也按用户说的来，数据库只做参考。\n4. 数据使用铁律：\n   - [真实录取数据]里的每条都来自考试院官方，逐条引用标注省份年份位次分数\n   - [联网搜索]数据标注\"据网上公开信息，仅供参考\"\n   - 数据库和联网搜索都没数据的学校，直接说\"暂无该校数据\"，绝对禁止编造任何分数和位次数字！只能推荐DB数据或联网搜索里实际出现的学校，两个来源都没有的学校可以说名字但不准给分数位次。\n   - 【死命令】如果DB返回空+联网也没搜到具体位次，你只能说\"建议查省考试院官网\"，不准说'据网上公开信息约XXX分'来模糊编造。没有就是没有。\n4. 专业过滤铁律（极其重要！）：\n   - 用户说了想学什么专业，就只推荐这些专业或相关方向\n   - 用户明确排斥的专业（如生化环材/土木/护理等）一律过滤掉，提都不要提\n   - DB数据里混了不相关的专业（如用户要计算机结果DB返回了中医学），你必须手动筛掉\n   - 优先推荐专业对口的学校，即使它的位次稍远，也比专业不对口的学校强\n5. 普通家庭优先技术类(计算机/软件/电子/电气/自动化/机械)。无公检法资源慎选法学\n6. 生化环材土木护理等天坑专业主动提醒用户避开\n\n【回答结构】\n第1步:确认省份政策→\"你是XX省考生，XX模式，可填N个志愿...\"\n第2步:冲的学校——只推荐专业对口的，逐一列出DB数据或联网数据，没数据的跳过\n第3步:稳的学校——同上，优先专业对口的\n第4步:保的学校——同上\n第5步:补充建议\n\n重要:不要只给3-5所学校。DB数据的学校优先推荐。没有真实数据的学校不要瞎编分数位次。";
 var PF="你就是张雪峰。东北口音贼快。巧乐兹三口一个。雪碧喝口。你跑不过我半马PB一小时四十七。牢峰自嘲。新闻学打晕。文科舔。天坑翻车。18999圆梦卡。428分他说命。齐齐哈尔拿生命担保。考编不异地异地不乡镇。东北味那啥整可不咋的。拍桌子软下来先笑再怼。不说作为AI建议您。不编数据不碰政治。";
 
 function S(id){return document.getElementById(id);}
@@ -221,15 +250,16 @@ async function send(){
   var prompt=(c.mode==='fun')?PF:PG;var ms=[{role:'system',content:prompt}];
   console.log('dataHint length:',dh.length);
   if(dh&&dh.indexOf('暂无数据')<0){ms.push({role:'system',content:'【以下是查询到的真实数据，你必须逐条引用，并据此给出冲稳保建议】\n'+dh});}
+  else if(dh){ms.push({role:'system',content:'【查询结果】\n'+dh+'\n\n数据库未返回有效数据。你可以结合联网搜索结果给出方向性建议，但绝对禁止编造具体分数和位次数字。'});}
   else{ms.push({role:'system',content:'【注意】数据库和联网搜索均未找到具体数据。你必须明确说"暂无该省该专业的录取数据"，建议查省教育考试院官网。不准编造任何具体位次和分数数字。可以给择校方向建议，但要注明"以下为方向性建议，非具体数据"。'});}
-  var info=extractInfo(t);if(info.province){var pr='【省份志愿政策提醒】';var ng={'浙江':80,'山东':96,'河北':96,'重庆':96,'辽宁':112};var gg={'江苏':40,'广东':45,'湖北':45,'湖南':45,'福建':40,'北京':30,'天津':50,'上海':24,'海南':24};if(ng[info.province]){pr+=info.province+'是专业+院校模式，可填'+ng[info.province]+'个志愿。你必须推荐足够多的学校(至少30-50所)，不要只给3-5所！';}else if(gg[info.province]){pr+=info.province+'是院校+专业组模式，可填'+gg[info.province]+'个专业组。你必须推荐足够数量，填满80%以上位置！';}else{pr+=info.province+'是老高考模式，请推荐8-12所学校，每所填满6个专业，并提醒服从调剂风险。';}ms.push({role:'system',content:pr});}
+  var info=extractInfo(t);if(info.province){var pr='【省份志愿政策提醒】';var ng={'浙江':80,'山东':96,'河北':96,'重庆':96,'辽宁':112};var gg={'江苏':40,'广东':45,'湖北':45,'湖南':45,'福建':40,'北京':30,'天津':50,'上海':24,'海南':24,'河南':48,'四川':45,'陕西':45,'山西':45,'云南':40,'贵州':45,'内蒙古':45,'安徽':45,'江西':45,'黑龙江':40,'吉林':40,'广西':40,'甘肃':45,'新疆':45,'宁夏':45,'青海':45,'西藏':45};if(ng[info.province]){pr+=info.province+'是专业+院校模式，可填'+ng[info.province]+'个志愿。你必须推荐足够多的学校(至少30-50所)，不要只给3-5所！';}else if(gg[info.province]){pr+=info.province+'是院校+专业组模式，可填'+gg[info.province]+'个专业组。你必须推荐足够数量，填满80%以上位置！';}else{pr+=info.province+'请推荐足够多的学校和专业，并提醒注意调剂风险。';}ms.push({role:'system',content:pr});}
   for(var i=Math.max(0,c.msgs.length-25);i<c.msgs.length;i++)ms.push({role:c.msgs[i].role,content:c.msgs[i].content});
   try{
     var r=await fetch(cfg.url.replace(/\/+$/,'')+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+cfg.key},body:JSON.stringify({model:cfg.model||'deepseek-chat',messages:ms,temperature:0.7})});
     if(!r.ok){var e=await r.json().catch(function(){return{};});throw new Error(e.error&&e.error.message||'HTTP '+r.status);}
     var d=await r.json();var reply=d.choices[0].message.content;
-    if(dh&&dh.indexOf('暂无数据')<0)reply='[查询到的数据]\n'+dh+'\n---\n[张雪峰分析]\n'+reply;
-    else reply='[注意：数据库和联网搜索均未找到具体数据。以下分析仅供参考，具体请查省教育考试院官网！]\n\n'+reply;
+    if(dh&&dh.indexOf('暂无数据')<0)reply='[查询到的数据]\n'+dh+'\n---\n'+reply;
+    else reply='[查询参数] '+dh+'\n---\n'+reply;
     c.msgs.push({role:'assistant',content:reply});
   }catch(e){c.msgs.push({role:'assistant',content:'出错：'+e.message});}
   render();save();
@@ -238,13 +268,29 @@ async function send(){
 // ===== 智能数据提取（正则，无需API） =====
 function extractInfo(t){
   var info={province:'',rank:0,score:0,major:'',school:''};
+  // 省份：找文本中最先出现的那个（不是列表中最先的）
   var provs=['北京','天津','上海','重庆','河北','山西','辽宁','吉林','黑龙江','江苏','浙江','安徽','福建','江西','山东','河南','湖北','湖南','广东','广西','海南','四川','贵州','云南','西藏','陕西','甘肃','青海','宁夏','新疆','内蒙古'];
-  for(var i=0;i<provs.length;i++){if(t.indexOf(provs[i])>=0){info.province=provs[i];break;}}
+  var bestIdx=t.length,bestProv='';
+  for(var i=0;i<provs.length;i++){
+    var idx=t.indexOf(provs[i]);
+    if(idx>=0&&idx<bestIdx){bestIdx=idx;bestProv=provs[i];}
+  }
+  info.province=bestProv;
   var rm=t.match(/(\d{4,7})\s*[位名]/)||t.match(/[位名]次?\s*(\d{4,7})/)||t.match(/排[名行]\s*(\d{4,7})/);
   if(rm){info.rank=parseInt(rm[1])||parseInt(rm[2])||0;}
   var sm=t.match(/(\d{3})\s*分/);if(sm){info.score=parseInt(sm[1]);}
-  var majors=['计算机','软件','电气','机械','自动化','土木','临床','口腔','法学','会计','金融','物联网','人工智能','大数据','电子','通信','材料','化工','生物','医学','护理','师范','英语','日语','新闻','设计','美术','音乐','体育','汉语言','思政','马克思','数学','物理','化学','历史','地理','航空航天','能源','交通','环境'];
-  for(var i=0;i<majors.length;i++){if(t.indexOf(majors[i])>=0){info.major=majors[i];break;}}
+  // 专业：过滤掉否定句式中的词（不学X/不接受X/不读X/不选X/别推荐X）
+  var majors=['计算机','软件','电气','机械','自动化','土木','临床','口腔','法学','会计','金融','物联网','人工智能','大数据','电子','通信','材料','化工','生物','医学','护理','师范','英语','日语','新闻','设计','美术','音乐','体育','汉语言','思政','马克思','数学','化学','地理','航空航天','能源','交通','环境'];
+  var neg=t.match(/(?:不学|不接受|不读|不选|别推荐|别学|拒绝|排斥|不想学|不考虑).*?(?:[。，,;\n]|$)/g)||[];
+  // 也排除描述性用语：XX一般/不好/不行/差/弱/烂，XX好/擅长这类不是专业偏好
+  var desc=t.match(/(?:英语|数学|语文|物理|化学|生物|历史|地理|政治).*?(?:一般|不好|不行|差|弱|烂|还行|凑合|勉强)/g)||[];
+  var desc2=t.match(/(?:英语|数学|语文|物理|化学|生物|历史|地理|政治).*?(?:好|不错|擅长|强|可以|能行)/g)||[];
+  var negStr=neg.join('')+desc.join('')+desc2.join('');
+  var found=[];
+  for(var i=0;i<majors.length;i++){
+    if(t.indexOf(majors[i])>=0&&negStr.indexOf(majors[i])<0){found.push(majors[i]);}
+  }
+  if(found.length>0)info.major=found.join(',');
   var sch=t.match(/[一-鿿]{2,8}(大学|学院)/);if(sch){info.school=sch[0];}
   return info;
 }
@@ -254,7 +300,7 @@ async function searchWeb(query, cfg, n){
   n=n||3;var results=[];
   if(cfg.tavily){
     try{
-      var r=await fetch('https://api.tavily.com/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:cfg.tavily,query:query,search_depth:'basic',include_answer:true,max_results:n})});
+      var r=await fetch('https://api.tavily.com/search',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+cfg.tavily},body:JSON.stringify({query:query,search_depth:'basic',include_answer:true,max_results:n})});
       if(r.ok){var d=await r.json();if(d.answer)results.push('[Tavily总结] '+d.answer);if(d.results){d.results.forEach(function(x){results.push(x.title+': '+x.content.slice(0,300));});}}
     }catch(e){console.warn('Tavily failed:',e.message);}
   }
@@ -272,49 +318,22 @@ async function queryData(t){
   var cfg=getCfg();
   var info={province:'',rank:0,score:0,majors:[],schools:[],keywords:[]};
 
-  // 第1步：AI智能提取（优先——能理解"一万三""川籍""物化生"等复杂语境）
-  if(cfg.key){
-    try{
-      var xp='从用户的高考咨询消息中提取信息。注意理解口语表达：\n';
-      xp+='- "一万三左右""1万3"→13000，"省排13420"→13420\n';
-      xp+='- "我是四川的""川籍"→四川\n';
-      xp+='- "物化生"→物理类，"史政地"→历史类\n';
-      xp+='- "想学自动化机械电气"→majors:["自动化","机械","电气"]\n';
-      xp+='- "不想去新疆云贵"→region_avoid:["新疆","云南","贵州"]\n';
-      xp+='返回JSON:{"province":"","rank":0,"score":0,"subject":"","majors":[],"schools":[],"region_pref":[],"region_avoid":[],"keywords":[]}\n';
-      xp+='keywords填适合联网搜索的关键词(如"四川 自动化专业 录取位次 2024")\n只返回JSON。\n用户消息: '+t;
-      var er=await fetch(cfg.url.replace(/\/+$/,'')+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+cfg.key},body:JSON.stringify({model:cfg.model||'deepseek-chat',messages:[{role:'user',content:xp}],temperature:0,max_tokens:250})});
-      if(er.ok){
-        var ed=await er.json();var raw=ed.choices[0].message.content.replace(/```/g,'').replace(/json/g,'').trim();
-        var ai=JSON.parse(raw);
-        info.province=ai.province||'';
-        info.rank=parseInt(ai.rank)||0;
-        info.score=parseInt(ai.score)||0;
-        info.majors=ai.majors||[];
-        info.schools=ai.schools||[];
-        info.keywords=ai.keywords||[];
-        console.log('AI提取:',JSON.stringify(info));
-      }
-    }catch(e){console.warn('AI提取失败，降级到正则:',e.message);}
-  }
+  // 直接正则提取（不用AI，避免API卡住）
+  var re=extractInfo(t);
+  info.province=re.province||'';
+  info.rank=re.rank||0;
+  info.score=re.score||0;
+  info.majors=re.major?[re.major]:[];
+  info.schools=re.school?[re.school]:[];
+  console.log('正则提取:',JSON.stringify(info));
 
-  // 第2步：正则兜底（AI提取失败或没有API key时）
-  if(!info.province||!info.rank){
-    var re=extractInfo(t);
-    if(!info.province&&re.province)info.province=re.province;
-    if(!info.rank&&re.rank)info.rank=re.rank;
-    if(!info.score&&re.score)info.score=re.score;
-    if(!info.majors.length&&re.major)info.majors=[re.major];
-    if(!info.schools.length&&re.school)info.schools=[re.school];
-    console.log('正则兜底:',JSON.stringify(info));
-  }
-
-  if(!info.province||!info.rank){console.log('无法提取省份/位次，跳过DB搜索');return'';}
+  console.log('DEBUG queryData params:',JSON.stringify({province:info.province,rank:info.rank,score:info.score,majors:info.majors}));
+  if(!info.province||(!info.rank&&!info.score)){console.log('无法提取省份/位次/分数，跳过DB搜索');return'缺少省份或分数位次';}
 
   // 第3步：搜索本地数据库
   var dbData='';
   try{
-    var qp=['province='+encodeURIComponent(info.province),'rank='+info.rank];
+    var qp=['province='+encodeURIComponent(info.province),'rank='+info.rank,'score='+info.score];
     if(info.majors&&info.majors.length){qp.push('keyword='+encodeURIComponent(info.majors.join(',')));}
     if(info.schools.length)qp.push('school='+encodeURIComponent(info.schools[0]));
     var resp=await fetch('recommend?'+qp.join('&'));
@@ -322,39 +341,62 @@ async function queryData(t){
       var j=await resp.json();
       if(j.chong||j.wen||j.bao){
         dbData='【本地数据库·冲稳保推荐】位次'+j.rank+'\n';
-        if(j.chong&&j.chong.length){dbData+='\n▎冲 (录取位次高于你，可以试试):\n';j.chong.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+d.score+'分 位次'+d.rank+'\n';});}
-        if(j.wen&&j.wen.length){dbData+='\n▎稳 (位次匹配，有把握):\n';j.wen.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+d.score+'分 位次'+d.rank+'\n';});}
-        if(j.bao&&j.bao.length){dbData+='\n▎保 (位次高于要求，稳录):\n';j.bao.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+d.score+'分 位次'+d.rank+'\n';});}
-        if(!j.chong.length&&!j.wen.length&&!j.bao.length){dbData+='(数据库暂无该位次范围的录取记录)\n';}
+        if(j.chong&&j.chong.length){dbData+='\n▎冲 (录取位次高于你，可以试试):\n';j.chong.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+(d.score||'?')+'分 位次'+(d.rank||'?')+'\n';});}
+        if(j.wen&&j.wen.length){dbData+='\n▎稳 (位次匹配，有把握):\n';j.wen.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+(d.score||'?')+'分 位次'+(d.rank||'?')+'\n';});}
+        if(j.bao&&j.bao.length){dbData+='\n▎保 (位次高于要求，稳录):\n';j.bao.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+(d.score||'?')+'分 位次'+(d.rank||'?')+'\n';});}
+        if(!j.chong.length&&!j.wen.length&&!j.bao.length){dbData+='(数据库暂无数据。查询参数: 省='+info.province+' 位次='+info.rank+' 分数='+info.score+' 关键词='+(info.majors.join(',')||'无')+')\n';}
       }
     }
   }catch(e){console.warn('DB搜索失败:',e.message);}
 
-  // 第4步：联网搜索（用AI提取的keywords或自动生成）
+  // 第4步：联网搜索——三路并发：验证DB数据 + 补全2025 + 行业趋势
   var webData='';
   try{
-    var queries=info.keywords.slice(0,4);
-    if(!queries.length){
-      if(info.majors.length&&info.province)queries.push(info.province+' '+info.majors[0]+'专业 录取位次 2024');
-      if(info.schools.length)queries.push(info.schools[0]+' '+info.province+' 录取分数线 位次 2024');
-      queries.push(info.province+' 高考 '+info.rank+'位次 能报哪些大学');
-      if(info.majors.length)queries.push(info.majors[0]+'专业 就业前景 薪资');
+    var queries=[];
+    // 路1：验证DB学校（冲稳保各5所，搜最新分数线）
+    var dbSchools=[];
+    if(j&&j.chong)for(var i=0;i<Math.min(5,j.chong.length);i++)dbSchools.push(j.chong[i].school);
+    if(j&&j.wen)for(var i=0;i<Math.min(5,j.wen.length);i++)dbSchools.push(j.wen[i].school);
+    if(j&&j.bao)for(var i=0;i<Math.min(5,j.bao.length);i++)dbSchools.push(j.bao[i].school);
+    for(var i=0;i<dbSchools.length;i++){
+      queries.push(dbSchools[i]+' '+info.province+' 2025 录取分数线 位次');
     }
+    // 批量搜学校优势（合并前8所）
+    if(dbSchools.length>0){
+      queries.push(dbSchools.slice(0,8).join(' ')+' 王牌专业 学校层次 就业优势 学费');
+    }
+    // 路2：补全DB没有的2025数据
+    if(info.majors.length&&info.province){
+      queries.push(info.province+' 2025年 '+info.majors[0]+'专业 录取位次 本科批');
+      queries.push(info.province+' '+info.rank+'位次 2025 能报哪些大学 '+info.majors.join(' '));
+    }
+    // 路3：行业趋势和就业
+    if(info.majors.length){
+      queries.push(info.majors[0]+'专业 2025 2026 就业前景 薪资 行业趋势');
+    }
+    // AI提取的关键词也加上
+    if(info.keywords&&info.keywords.length){
+      for(var i=0;i<Math.min(2,info.keywords.length);i++)queries.push(info.keywords[i]);
+    }
+    // 去重query
+    var seenQ={};var finalQ=[];
+    for(var i=0;i<queries.length;i++){if(!seenQ[queries[i]]){seenQ[queries[i]]=1;finalQ.push(queries[i]);}}
+    // 并发搜索（最多20个query）
     var allWeb=[];
-    for(var i=0;i<queries.length;i++){
-      var wr=await searchWeb(queries[i],cfg,3);
+    for(var i=0;i<Math.min(20,finalQ.length);i++){
+      var wr=await searchWeb(finalQ[i],cfg,3);
       allWeb=allWeb.concat(wr);
     }
     var seen={};var unique=[];
     for(var i=0;i<allWeb.length;i++){var k=allWeb[i].slice(0,50);if(!seen[k]){seen[k]=1;unique.push(allWeb[i]);}}
-    if(unique.length){webData='【联网搜索·仅供参考】\n';unique.slice(0,10).forEach(function(w){webData+='· '+w.slice(0,400)+'\n';});}
+    if(unique.length){webData='【联网搜索·仅供参考】\n';unique.slice(0,25).forEach(function(w){webData+='· '+w.slice(0,350)+'\n';});}
   }catch(e){console.warn('联网搜索失败:',e.message);}
 
   // 第5步：整合
-  var result='';
+  var result='[DEBUG] province='+info.province+' rank='+info.rank+' score='+info.score+' majors='+(info.majors||[]).join(',')+'\n';
   if(dbData)result+=dbData+'\n';
   if(webData)result+=webData+'\n';
-  if(!dbData&&!webData)result='暂无数据\n';
+  if(!dbData&&!webData)result+='DB和联网搜索均无结果。查询URL: recommend?province='+encodeURIComponent(info.province)+'&rank='+info.rank+'&score='+info.score+'&keyword='+encodeURIComponent((info.majors||[]).join(','))+'\n';
   return result;
 }
 function getCfg(){return{url:localStorage.getItem('cf_url')||'https://api.deepseek.com',key:localStorage.getItem('cf_key')||'',model:localStorage.getItem('cf_model')||'deepseek-chat',tavily:localStorage.getItem('cf_tav')||''};}
