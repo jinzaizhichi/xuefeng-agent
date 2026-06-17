@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""雪峰Agent — 单文件服务器：HTML UI + API + 数据库查询"""
+import os, re, json, sqlite3, gzip, shutil, urllib.request, urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(HERE, 'admission_clean.db')
+GZ_PATH = os.path.join(HERE, 'admission_clean.db.gz')
+if not os.path.exists(DB_PATH) and os.path.exists(GZ_PATH):
+    with gzip.open(GZ_PATH, 'rb') as gz:
+        with open(DB_PATH, 'wb') as f:
+            shutil.copyfileobj(gz, f)
+
+HAS_DB = os.path.exists(DB_PATH)
+
+PROVINCES = ['北京','天津','上海','重庆','河北','山西','辽宁','吉林','黑龙江','江苏','浙江','安徽',
+             '福建','江西','山东','河南','湖北','湖南','广东','广西','海南','四川','贵州','云南',
+             '西藏','陕西','甘肃','青海','宁夏','新疆','内蒙古']
+
+def query_db(province=None, school=None, major=None, limit=50):
+    if not HAS_DB: return None
+    conn = sqlite3.connect(DB_PATH)
+    conds, params = [], []
+    if province: conds.append("province LIKE ?"); params.append(f"%{province}%")
+    if school: conds.append("school LIKE ?"); params.append(f"%{school}%")
+    if major: conds.append("major LIKE ?"); params.append(f"%{major}%")
+    if not conds: conn.close(); return None
+    sql = f"SELECT province,year,school_name,major_name,score,rank FROM admission WHERE {' AND '.join(conds)} AND rank>100 ORDER BY year DESC,rank ASC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [{'province':r[0],'year':r[1],'school_name':r[2],'major_name':r[3],'score':r[4],'rank':r[5]} for r in rows]
+
+def web_search(query, n=5):
+    try:
+        url = "https://www.baidu.com/s?wd=" + urllib.parse.quote(query)
+        req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        results = []
+        for u in re.findall(r'href="(https?://[^"]+)"', html):
+            if any(s in u for s in ['baidu.com','.css','.js','.png','.jpg']): continue
+            if len(u) < 60: continue
+            try:
+                pr = urllib.request.Request(u, headers={"User-Agent":"Mozilla/5.0"})
+                with urllib.request.urlopen(pr, timeout=6) as prr:
+                    ph = prr.read().decode("utf-8", errors="ignore")
+                clean = re.sub(r'<script[^>]*>.*?</script>','',ph,flags=re.DOTALL)
+                clean = re.sub(r'<style[^>]*>.*?</style>','',clean,flags=re.DOTALL)
+                clean = re.sub(r'<[^>]+>',' ',clean)
+                clean = re.sub(r'\s+',' ',clean).strip()
+                if len(clean) > 100: results.append(clean[:400])
+                if len(results) >= n: break
+            except: continue
+        return results if results else ["搜索无结果"]
+    except Exception as e:
+        return [f"搜索失败:{e}"]
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, data, code=200):
+        self.send_response(code)
+        self.send_header('Content-Type','application/json;charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin','*')
+        self.send_header('Cache-Control','no-cache')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin','*')
+        self.send_header('Access-Control-Allow-Methods','GET,OPTIONS')
+        self.send_header('Access-Control-Allow-Headers','*')
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path == '/ping':
+            return self._send({'ok':True,'db':HAS_DB})
+        if self.path.startswith('/query'):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            rows = query_db(qs.get('province',[''])[0], qs.get('school',[''])[0], qs.get('major',[''])[0])
+            return self._send({'db':rows,'count':len(rows) if rows else 0})
+        if self.path.startswith('/recommend'):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            prov = qs.get('province',[''])[0]
+            major = qs.get('major',[''])[0]
+            keyword = qs.get('keyword',[''])[0]
+            try: rank = int(qs.get('rank',['0'])[0])
+            except: rank = 0
+            if prov and rank > 0:
+                conn = sqlite3.connect(DB_PATH)
+                base = "province LIKE ? AND rank>0"
+                bp = [f'%{prov}%']
+                if major: base += " AND major_name LIKE ?"; bp.append(f'%{major}%')
+                if keyword:
+                    kws = keyword.split(',')
+                    kw_conds = []
+                    for kw in kws:
+                        kw_conds.append("major_name LIKE ?")
+                        bp.append(f'%{kw}%')
+                    base += " AND (" + " OR ".join(kw_conds) + ")"
+                chong = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                    conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank<? AND rank>=? ORDER BY rank ASC LIMIT 50",
+                    bp+[rank, max(1,int(rank*0.7))]).fetchall()]
+                wen = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                    conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank>=? AND rank<=? ORDER BY rank ASC LIMIT 50",
+                    bp+[rank, int(rank*1.3)]).fetchall()]
+                bao = [{'school':r[0],'major':r[1],'score':r[2],'rank':r[3],'year':r[4]} for r in
+                    conn.execute(f"SELECT school_name,major_name,score,rank,year FROM admission WHERE {base} AND rank>? AND rank<=? ORDER BY rank ASC LIMIT 50",
+                    bp+[int(rank*1.3), int(rank*1.6)]).fetchall()]
+                conn.close()
+                return self._send({'rank':rank,'chong':chong,'wen':wen,'bao':bao})
+            return self._send({'error':'need province and rank'},400)
+        if self.path.startswith('/search'):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = qs.get('q',[''])[0]
+            if q: return self._send({'results':web_search(q)})
+            return self._send({'results':[]})
+
+        # Serve image files
+        for img in ['img_suit.png','img_scifi.png']:
+            if self.path == '/'+img:
+                ip = os.path.join(HERE, img)
+                if os.path.exists(ip):
+                    self.send_response(200)
+                    self.send_header('Content-Type','image/png')
+                    self.send_header('Cache-Control','max-age=3600')
+                    self.end_headers()
+                    with open(ip,'rb') as f: self.wfile.write(f.read())
+                    return
+
+        # Serve the main UI page
+        self.send_response(200)
+        self.send_header('Content-Type','text/html;charset=utf-8')
+        self.send_header('Cache-Control','no-cache')
+        self.end_headers()
+        self.wfile.write(HTML_PAGE.encode('utf-8'))
+
+    def log_message(self, format, *args):
+        msg = format%args if args else format
+        if '/recommend' in msg or '/query' in msg or '/ping' in msg:
+            print(f"[REQ] {msg}")
+
+# ========== 完整的 HTML 页面（内嵌 JS）==========
+HTML_PAGE = r'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>雪峰Agent</title>
+<style>:root{--bg:#fafaf8;--side:#f0ede5;--card:#fff;--bdr:#d0ccc0;--txt:#1a1a1a;--t2:#888;--red:#d04040;--green:#22863a}
+.dark{--bg:#1a1a18;--side:#222220;--card:#2a2a26;--bdr:#444;--txt:#ddd;--red:#e05555}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font:14px/1.7 'PingFang SC','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--txt);height:100vh;display:flex}
+.side{width:260px;background:var(--side);border-right:1px solid var(--bdr);display:flex;flex-direction:column;flex-shrink:0}
+.side h2{padding:20px 18px 8px;font-size:18px}.side .sub{font-size:11px;color:var(--t2);padding:0 18px 16px;border-bottom:1px solid var(--bdr)}
+.list{overflow-y:auto;padding:4px 12px;flex:1;min-height:60px}
+.item{padding:10px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--t2);margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item:hover{background:var(--card)}.item.on{background:var(--red);color:#fff}
+.new-btn{margin:8px 12px 16px;padding:8px;text-align:center;border:1px dashed var(--bdr);border-radius:6px;cursor:pointer;font-size:12px;color:var(--t2)}
+.new-btn:hover{background:var(--card)}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.bar{height:60px;display:flex;align-items:center;padding:0 20px;border-bottom:2px solid var(--bdr);gap:12px;background:var(--side)}
+.bar .logo{font-weight:700;font-size:17px;margin-right:auto}
+.bar button{padding:6px 12px;border:1px solid var(--bdr);border-radius:6px;background:var(--card);cursor:pointer;font-size:12px;color:var(--txt)}
+.bar button.on{background:var(--red);color:#fff;border-color:var(--red)}.bar .api-btn{background:var(--red);color:#fff;border-color:var(--red)}
+.bar img{width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid var(--bdr)}
+.msgs{flex:1;overflow-y:auto;padding:20px 40px}
+.welcome{text-align:center;margin-top:80px;color:var(--t2)}.welcome .icon{font-size:48px;margin-bottom:12px}
+.bubble{max-width:75%;padding:12px 16px;border-radius:10px;margin-bottom:10px;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.bubble.u{background:var(--red);color:#fff;margin-left:auto}.bubble.a{background:var(--side);border:1px solid var(--bdr)}
+.bubble .who{font-size:10px;opacity:.6;margin-bottom:4px}
+.inp{padding:12px 20px 20px;display:flex;gap:8px}
+.inp textarea{flex:1;padding:12px;border:1px solid var(--bdr);border-radius:6px;font:inherit;resize:none;height:50px;background:var(--card);color:var(--txt);outline:none}
+.inp textarea:focus{border-color:var(--red)}.inp button{padding:0 20px;background:var(--red);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;display:none;align-items:center;justify-content:center}
+.overlay>div{background:var(--card);border-radius:12px;padding:28px;width:460px;border:1px solid var(--bdr)}
+.overlay h3{margin-bottom:16px}.overlay label{display:block;font-size:11px;color:var(--t2);margin:12px 0 4px}
+.overlay input{width:100%;padding:10px;border:1px solid var(--bdr);border-radius:6px;font:inherit;background:var(--bg);color:var(--txt)}
+.overlay .btns{display:flex;gap:8px;margin-top:20px}.overlay .btns button{padding:10px 20px;border:1px solid var(--bdr);border-radius:6px;cursor:pointer}.overlay .btns .ok{flex:1;background:var(--red);color:#fff}
+.st{font-size:12px;margin-top:10px}.st.g{color:var(--green)}.st.b{color:var(--red)}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--t2);animation:dot 1.4s infinite;margin:0 2px}
+.dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}
+@keyframes dot{0%,80%,100%{transform:scale(.6)}40%{transform:scale(1)}}
+.fun-bg{position:relative}.fun-bg::before{content:'';position:absolute;left:0;top:0;bottom:0;width:58%;background:url(/img_scifi.png) left center/contain no-repeat;opacity:0.8;pointer-events:none;z-index:0}
+.bubble{position:relative;z-index:1}.welcome{position:relative;z-index:1}
+</style></head><body>
+<div class="side"><h2>雪峰Agent v2.1</h2><div class="sub">AI高考志愿顾问</div>
+<div class="list" id="chatList"></div><div class="new-btn" id="newBtn">+ 新建对话</div></div>
+<div class="main"><div class="bar"><span class="logo">雪峰Agent</span>
+<button id="btnG" class="on">报考</button><button id="btnF">娱乐</button>
+<img id="avt" src="/img_suit.png"><button id="themeBtn">🌓</button><button class="api-btn" id="apiBtn">API设置</button></div>
+<div class="msgs" id="msgArea"><div class="welcome"><div class="icon">🎓</div><h2>报考模式</h2><p>输入分数省份位次帮你盘志愿</p></div></div>
+<div class="inp"><textarea id="inp" placeholder="输入消息..."></textarea><button id="sendBtn">发送</button></div></div>
+<div class="overlay" id="setOverlay"><div><h3>API设置</h3>
+<label>Base URL</label><input id="sUrl" placeholder="https://api.deepseek.com">
+<label>API Key</label><input type="password" id="sKey" placeholder="sk-...">
+<label>Model</label><input id="sModel" placeholder="deepseek-chat">
+<label>Tavily Key <span style="color:var(--t2);font-size:10px">(可选)</span></label><input type="password" id="sTav" placeholder="tvly-...">
+<div class="btns"><button id="closeSetBtn">取消</button><button class="ok" id="testBtn">保存并测试</button></div><div class="st" id="st"></div></div></div>
+<script>
+var chats,curId,mode;try{chats=JSON.parse(localStorage.getItem('xf_chats')||'{}');}catch(e){chats={};localStorage.removeItem('xf_chats');}curId=localStorage.getItem('xf_cur')||'';mode=localStorage.getItem('xf_mode')||'gaokao';
+var PG="你是资深高考志愿规划师，风格直爽接地气，像张雪峰一样。\n\n【核心规则】\n1. 省份志愿政策感知：\n   专业+院校(浙江80个/山东96个/河北96个/重庆96个/辽宁112个)→推荐至少30-50所\n   院校+专业组(江苏40/广东45/湖北45/湖南45/福建40/北京30/天津50/上海24/海南24)→推荐填满80%+\n   老高考(河南/四川/陕西等)→推荐8-12所，每所填满6个专业\n2. 冲稳保比例：冲20%稳50%保30%，保底至少3个\n3. 数据使用铁律：\n   - [真实录取数据]里的每条都来自考试院官方，逐条引用标注省份年份位次分数\n   - [联网搜索]数据标注\"据网上公开信息，仅供参考\"\n   - 数据库和联网搜索都没数据的学校，直接说\"暂无该校数据\"，绝对禁止编造任何分数和位次数字！\n4. 专业过滤铁律（极其重要！）：\n   - 用户说了想学什么专业，就只推荐这些专业或相关方向\n   - 用户明确排斥的专业（如生化环材/土木/护理等）一律过滤掉，提都不要提\n   - DB数据里混了不相关的专业（如用户要计算机结果DB返回了中医学），你必须手动筛掉\n   - 优先推荐专业对口的学校，即使它的位次稍远，也比专业不对口的学校强\n5. 普通家庭优先技术类(计算机/软件/电子/电气/自动化/机械)。无公检法资源慎选法学\n6. 生化环材土木护理等天坑专业主动提醒用户避开\n\n【回答结构】\n第1步:确认省份政策→\"你是XX省考生，XX模式，可填N个志愿...\"\n第2步:冲的学校——只推荐专业对口的，逐一列出DB数据或联网数据，没数据的跳过\n第3步:稳的学校——同上，优先专业对口的\n第4步:保的学校——同上\n第5步:补充建议\n\n重要:不要只给3-5所学校。DB数据的学校优先推荐。没有真实数据的学校不要瞎编分数位次。";
+var PF="你就是张雪峰。东北口音贼快。巧乐兹三口一个。雪碧喝口。你跑不过我半马PB一小时四十七。牢峰自嘲。新闻学打晕。文科舔。天坑翻车。18999圆梦卡。428分他说命。齐齐哈尔拿生命担保。考编不异地异地不乡镇。东北味那啥整可不咋的。拍桌子软下来先笑再怼。不说作为AI建议您。不编数据不碰政治。";
+
+function S(id){return document.getElementById(id);}
+function setMode(m){mode=m;try{localStorage.setItem('xf_mode',m);}catch(e){}var bg=S('btnG'),bf=S('btnF'),av=S('avt'),ma=S('msgArea');if(bg)bg.className=m==='gaokao'?'on':'';if(bf)bf.className=m==='fun'?'on':'';if(av)av.src=m==='fun'?'/img_scifi.png':'/img_suit.png';if(ma){if(m==='fun')ma.classList.add('fun-bg');else ma.classList.remove('fun-bg');}render();}
+function newChat(){var id=Date.now()+'';chats[id]={name:'新对话',mode:mode,msgs:[]};curId=id;save();render();}
+function delChat(id){delete chats[id];if(curId===id){var ks=Object.keys(chats);curId=ks.length?ks[ks.length-1]:null;if(!curId)newChat();}save();render();}
+function save(){try{localStorage.setItem('xf_chats',JSON.stringify(chats));localStorage.setItem('xf_cur',curId||'');}catch(e){console.warn('save failed:',e.message);}}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function render(){
+  try{var h='';Object.keys(chats).forEach(function(id){var c=chats[id];if(!c||c.mode!==mode)return;var p=(c.msgs&&c.msgs.length)?(c.msgs[c.msgs.length-1].content||'').slice(0,18):'空';var on=id===curId?' on':'';h+='<div class=\"item'+on+'\" data-id=\"'+id+'\">'+(c.name||p)+'<span style=\"float:right;opacity:0.4;cursor:pointer\" data-del=\"'+id+'\">x</span></div>';});
+  var cl=S('chatList');if(cl)cl.innerHTML=h;
+  var m=S('msgArea');if(!m)return;
+  if(!curId||!chats[curId]||!chats[curId].msgs||!chats[curId].msgs.length){m.innerHTML='<div class=\"welcome\"><div class=\"icon\">'+(mode==='fun'?'🎭':'🎓')+'</div><h2>'+(mode==='fun'?'娱乐模式':'报考模式')+'</h2></div>';return;}
+  var hh='';var ms=chats[curId].msgs;for(var i=0;i<ms.length;i++){var x=ms[i];if(!x)continue;var who=x.role==='user'?'你':(chats[curId].mode==='fun'?'张雪峰':'顾问');var cls=x.role==='user'?'u':'a';hh+='<div class=\"bubble '+cls+'\"><div class=\"who\">'+who+'</div>'+esc(x.content||'')+'</div>';}
+  m.innerHTML=hh;m.scrollTop=m.scrollHeight;}catch(e){console.warn('render error:',e.message);}
+}
+
+async function send(){
+  var inp=S('inp');if(!inp)return;var t=inp.value.trim();if(!t)return;inp.value='';
+  if(!curId||!chats[curId])newChat();var c=chats[curId];if(!c){c={name:'新对话',mode:mode,msgs:[]};chats[curId]=c;}c.msgs.push({role:'user',content:t});if(c.name==='新对话')c.name=t.slice(0,16);render();save();
+  var a=S('msgArea');if(!a)return;var ld=document.createElement('div');ld.className='bubble a';ld.innerHTML='<div class=\"who\">...</div><span class=\"dot\"></span><span class=\"dot\"></span><span class=\"dot\"></span>';a.appendChild(ld);a.scrollTop=a.scrollHeight;
+  var cfg=getCfg();if(!cfg.key){c.msgs.push({role:'assistant',content:'请先点API设置填写Key'});render();save();return;}
+  var dh='';if(c.mode==='gaokao')dh=await queryData(t);
+  var prompt=(c.mode==='fun')?PF:PG;var ms=[{role:'system',content:prompt}];
+  console.log('dataHint length:',dh.length);
+  if(dh&&dh.indexOf('暂无数据')<0){ms.push({role:'system',content:'【以下是查询到的真实数据，你必须逐条引用，并据此给出冲稳保建议】\n'+dh});}
+  else{ms.push({role:'system',content:'【注意】数据库和联网搜索均未找到具体数据。你必须明确说"暂无该省该专业的录取数据"，建议查省教育考试院官网。不准编造任何具体位次和分数数字。可以给择校方向建议，但要注明"以下为方向性建议，非具体数据"。'});}
+  var info=extractInfo(t);if(info.province){var pr='【省份志愿政策提醒】';var ng={'浙江':80,'山东':96,'河北':96,'重庆':96,'辽宁':112};var gg={'江苏':40,'广东':45,'湖北':45,'湖南':45,'福建':40,'北京':30,'天津':50,'上海':24,'海南':24};if(ng[info.province]){pr+=info.province+'是专业+院校模式，可填'+ng[info.province]+'个志愿。你必须推荐足够多的学校(至少30-50所)，不要只给3-5所！';}else if(gg[info.province]){pr+=info.province+'是院校+专业组模式，可填'+gg[info.province]+'个专业组。你必须推荐足够数量，填满80%以上位置！';}else{pr+=info.province+'是老高考模式，请推荐8-12所学校，每所填满6个专业，并提醒服从调剂风险。';}ms.push({role:'system',content:pr});}
+  for(var i=Math.max(0,c.msgs.length-25);i<c.msgs.length;i++)ms.push({role:c.msgs[i].role,content:c.msgs[i].content});
+  try{
+    var r=await fetch(cfg.url.replace(/\/+$/,'')+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+cfg.key},body:JSON.stringify({model:cfg.model||'deepseek-chat',messages:ms,temperature:0.7})});
+    if(!r.ok){var e=await r.json().catch(function(){return{};});throw new Error(e.error&&e.error.message||'HTTP '+r.status);}
+    var d=await r.json();var reply=d.choices[0].message.content;
+    if(dh&&dh.indexOf('暂无数据')<0)reply='[查询到的数据]\n'+dh+'\n---\n[张雪峰分析]\n'+reply;
+    else reply='[注意：数据库和联网搜索均未找到具体数据。以下分析仅供参考，具体请查省教育考试院官网！]\n\n'+reply;
+    c.msgs.push({role:'assistant',content:reply});
+  }catch(e){c.msgs.push({role:'assistant',content:'出错：'+e.message});}
+  render();save();
+}
+
+// ===== 智能数据提取（正则，无需API） =====
+function extractInfo(t){
+  var info={province:'',rank:0,score:0,major:'',school:''};
+  var provs=['北京','天津','上海','重庆','河北','山西','辽宁','吉林','黑龙江','江苏','浙江','安徽','福建','江西','山东','河南','湖北','湖南','广东','广西','海南','四川','贵州','云南','西藏','陕西','甘肃','青海','宁夏','新疆','内蒙古'];
+  for(var i=0;i<provs.length;i++){if(t.indexOf(provs[i])>=0){info.province=provs[i];break;}}
+  var rm=t.match(/(\d{4,7})\s*[位名]/)||t.match(/[位名]次?\s*(\d{4,7})/)||t.match(/排[名行]\s*(\d{4,7})/);
+  if(rm){info.rank=parseInt(rm[1])||parseInt(rm[2])||0;}
+  var sm=t.match(/(\d{3})\s*分/);if(sm){info.score=parseInt(sm[1]);}
+  var majors=['计算机','软件','电气','机械','自动化','土木','临床','口腔','法学','会计','金融','物联网','人工智能','大数据','电子','通信','材料','化工','生物','医学','护理','师范','英语','日语','新闻','设计','美术','音乐','体育','汉语言','思政','马克思','数学','物理','化学','历史','地理','航空航天','能源','交通','环境'];
+  for(var i=0;i<majors.length;i++){if(t.indexOf(majors[i])>=0){info.major=majors[i];break;}}
+  var sch=t.match(/[一-鿿]{2,8}(大学|学院)/);if(sch){info.school=sch[0];}
+  return info;
+}
+
+// ===== 联网搜索：Tavily优先，Baidu兜底 =====
+async function searchWeb(query, cfg, n){
+  n=n||3;var results=[];
+  if(cfg.tavily){
+    try{
+      var r=await fetch('https://api.tavily.com/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:cfg.tavily,query:query,search_depth:'basic',include_answer:true,max_results:n})});
+      if(r.ok){var d=await r.json();if(d.answer)results.push('[Tavily总结] '+d.answer);if(d.results){d.results.forEach(function(x){results.push(x.title+': '+x.content.slice(0,300));});}}
+    }catch(e){console.warn('Tavily failed:',e.message);}
+  }
+  if(!results.length){
+    try{
+      var r2=await fetch('/search?q='+encodeURIComponent(query));
+      if(r2.ok){var d2=await r2.json();if(d2.results){d2.results.forEach(function(x){results.push(x);});}}
+    }catch(e){console.warn('Baidu search failed:',e.message);}
+  }
+  return results;
+}
+
+// ===== 主数据管线：AI分析提取→DB搜→联网搜→整合 =====
+async function queryData(t){
+  var cfg=getCfg();
+  var info={province:'',rank:0,score:0,majors:[],schools:[],keywords:[]};
+
+  // 第1步：AI智能提取（优先——能理解"一万三""川籍""物化生"等复杂语境）
+  if(cfg.key){
+    try{
+      var xp='从用户的高考咨询消息中提取信息。注意理解口语表达：\n';
+      xp+='- "一万三左右""1万3"→13000，"省排13420"→13420\n';
+      xp+='- "我是四川的""川籍"→四川\n';
+      xp+='- "物化生"→物理类，"史政地"→历史类\n';
+      xp+='- "想学自动化机械电气"→majors:["自动化","机械","电气"]\n';
+      xp+='- "不想去新疆云贵"→region_avoid:["新疆","云南","贵州"]\n';
+      xp+='返回JSON:{"province":"","rank":0,"score":0,"subject":"","majors":[],"schools":[],"region_pref":[],"region_avoid":[],"keywords":[]}\n';
+      xp+='keywords填适合联网搜索的关键词(如"四川 自动化专业 录取位次 2024")\n只返回JSON。\n用户消息: '+t;
+      var er=await fetch(cfg.url.replace(/\/+$/,'')+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+cfg.key},body:JSON.stringify({model:cfg.model||'deepseek-chat',messages:[{role:'user',content:xp}],temperature:0,max_tokens:250})});
+      if(er.ok){
+        var ed=await er.json();var raw=ed.choices[0].message.content.replace(/```/g,'').replace(/json/g,'').trim();
+        var ai=JSON.parse(raw);
+        info.province=ai.province||'';
+        info.rank=parseInt(ai.rank)||0;
+        info.score=parseInt(ai.score)||0;
+        info.majors=ai.majors||[];
+        info.schools=ai.schools||[];
+        info.keywords=ai.keywords||[];
+        console.log('AI提取:',JSON.stringify(info));
+      }
+    }catch(e){console.warn('AI提取失败，降级到正则:',e.message);}
+  }
+
+  // 第2步：正则兜底（AI提取失败或没有API key时）
+  if(!info.province||!info.rank){
+    var re=extractInfo(t);
+    if(!info.province&&re.province)info.province=re.province;
+    if(!info.rank&&re.rank)info.rank=re.rank;
+    if(!info.score&&re.score)info.score=re.score;
+    if(!info.majors.length&&re.major)info.majors=[re.major];
+    if(!info.schools.length&&re.school)info.schools=[re.school];
+    console.log('正则兜底:',JSON.stringify(info));
+  }
+
+  if(!info.province||!info.rank){console.log('无法提取省份/位次，跳过DB搜索');return'';}
+
+  // 第3步：搜索本地数据库
+  var dbData='';
+  try{
+    var qp=['province='+encodeURIComponent(info.province),'rank='+info.rank];
+    if(info.majors&&info.majors.length){qp.push('keyword='+encodeURIComponent(info.majors.join(',')));}
+    if(info.schools.length)qp.push('school='+encodeURIComponent(info.schools[0]));
+    var resp=await fetch('recommend?'+qp.join('&'));
+    if(resp.ok){
+      var j=await resp.json();
+      if(j.chong||j.wen||j.bao){
+        dbData='【本地数据库·冲稳保推荐】位次'+j.rank+'\n';
+        if(j.chong&&j.chong.length){dbData+='\n▎冲 (录取位次高于你，可以试试):\n';j.chong.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+d.score+'分 位次'+d.rank+'\n';});}
+        if(j.wen&&j.wen.length){dbData+='\n▎稳 (位次匹配，有把握):\n';j.wen.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+d.score+'分 位次'+d.rank+'\n';});}
+        if(j.bao&&j.bao.length){dbData+='\n▎保 (位次高于要求，稳录):\n';j.bao.slice(0,10).forEach(function(d){dbData+='· '+d.school+' '+d.major+' '+d.year+'年 最低'+d.score+'分 位次'+d.rank+'\n';});}
+        if(!j.chong.length&&!j.wen.length&&!j.bao.length){dbData+='(数据库暂无该位次范围的录取记录)\n';}
+      }
+    }
+  }catch(e){console.warn('DB搜索失败:',e.message);}
+
+  // 第4步：联网搜索（用AI提取的keywords或自动生成）
+  var webData='';
+  try{
+    var queries=info.keywords.slice(0,4);
+    if(!queries.length){
+      if(info.majors.length&&info.province)queries.push(info.province+' '+info.majors[0]+'专业 录取位次 2024');
+      if(info.schools.length)queries.push(info.schools[0]+' '+info.province+' 录取分数线 位次 2024');
+      queries.push(info.province+' 高考 '+info.rank+'位次 能报哪些大学');
+      if(info.majors.length)queries.push(info.majors[0]+'专业 就业前景 薪资');
+    }
+    var allWeb=[];
+    for(var i=0;i<queries.length;i++){
+      var wr=await searchWeb(queries[i],cfg,3);
+      allWeb=allWeb.concat(wr);
+    }
+    var seen={};var unique=[];
+    for(var i=0;i<allWeb.length;i++){var k=allWeb[i].slice(0,50);if(!seen[k]){seen[k]=1;unique.push(allWeb[i]);}}
+    if(unique.length){webData='【联网搜索·仅供参考】\n';unique.slice(0,10).forEach(function(w){webData+='· '+w.slice(0,400)+'\n';});}
+  }catch(e){console.warn('联网搜索失败:',e.message);}
+
+  // 第5步：整合
+  var result='';
+  if(dbData)result+=dbData+'\n';
+  if(webData)result+=webData+'\n';
+  if(!dbData&&!webData)result='暂无数据\n';
+  return result;
+}
+function getCfg(){return{url:localStorage.getItem('cf_url')||'https://api.deepseek.com',key:localStorage.getItem('cf_key')||'',model:localStorage.getItem('cf_model')||'deepseek-chat',tavily:localStorage.getItem('cf_tav')||''};}
+function openSet(){var ov=S('setOverlay');if(ov)ov.style.display='flex';var c=getCfg();var su=S('sUrl'),sk=S('sKey'),sm=S('sModel'),st=S('sTav');if(su)su.value=c.url;if(sk)sk.value=c.key;if(sm)sm.value=c.model;if(st)st.value=c.tavily;}
+function closeSet(){var ov=S('setOverlay');if(ov)ov.style.display='none';}
+async function testConn(){var su=S('sUrl'),sk=S('sKey'),sm=S('sModel'),sv=S('sTav'),stt=S('st');if(!su||!sk||!stt)return;var u=su.value.trim(),k=sk.value.trim(),m=sm?sm.value.trim():'',tv=sv?sv.value.trim():'';if(!u||!k){stt.innerHTML='<span class=\"st b\">请填写URL和Key</span>';return;}try{localStorage.setItem('cf_url',u);localStorage.setItem('cf_key',k);localStorage.setItem('cf_model',m);if(tv)localStorage.setItem('cf_tav',tv);}catch(e){}stt.textContent='测试中...';try{var r=await fetch(u.replace(/\/+$/,'')+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify({model:m||'deepseek-chat',messages:[{role:'user',content:'hi'}],max_tokens:5})});if(r.ok){stt.innerHTML='<span class=\"st g\">连接OK</span>';setTimeout(closeSet,800);}else{var e=await r.json().catch(function(){return{};});stt.innerHTML='<span class=\"st b\">'+(e.error&&e.error.message||'')+'</span>';}}catch(e){stt.innerHTML='<span class=\"st b\">'+e.message+'</span>';}}
+
+// Event bindings
+function B(id,ev,fn){var el=S(id);if(el)el[ev]=fn;}
+B('btnG','onclick',function(){setMode('gaokao');});B('btnF','onclick',function(){setMode('fun');});
+B('newBtn','onclick',function(){newChat();});B('sendBtn','onclick',function(){send();});
+B('themeBtn','onclick',function(){document.body.classList.toggle('dark');localStorage.setItem('xf_dark',document.body.classList.contains('dark')?'1':'');});
+B('apiBtn','onclick',function(){openSet();});B('closeSetBtn','onclick',function(){closeSet();});B('testBtn','onclick',function(){testConn();});
+B('setOverlay','onclick',function(e){if(e.target===this)closeSet();});
+B('inp','onkeydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
+B('chatList','onclick',function(e){var el=e.target;if(el.dataset.del){delChat(el.dataset.del);return;}var item=el.closest('.item');if(item){curId=item.dataset.id;if(chats[curId]&&chats[curId].mode)setMode(chats[curId].mode);else render();save();}});
+// init
+try{
+if(localStorage.getItem('xf_dark')==='1')document.body.classList.add('dark');
+if(!curId||!chats[curId]){var nid=Date.now()+'';chats[nid]={name:'新对话',mode:mode,msgs:[]};curId=nid;save();}
+setMode(mode);render();
+}catch(e){console.warn('init error:',e.message);document.body.innerHTML='<div style=\"padding:40px;text-align:center\"><h2>加载失败</h2><p>请清除浏览器缓存后刷新 (Ctrl+Shift+Del)</p></div>';}
+</script></body></html>'''
+
+def main():
+    port = 8765
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    print(f'雪峰Agent: http://127.0.0.1:{port}/')
+    print(f'数据库: {"已加载" if HAS_DB else "未找到"}')
+    try: server.serve_forever()
+    except KeyboardInterrupt: server.shutdown(); print('\n已停止')
+
+if __name__ == '__main__': main()
