@@ -6,27 +6,16 @@ echo ==============================
 echo   雪峰Agent 启动中...
 echo ==============================
 
-:: Kill any existing server on port 8765
+:: 关掉旧进程
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8765.*LISTENING"') do (
-    echo   关闭旧进程 PID:%%a
     taskkill /PID %%a /F >nul 2>&1
 )
-timeout /t 1 >nul
 
-:: Start server
-start "雪峰Agent服务器" python server.py
+:: 启动服务器
+start "雪峰Agent" python server.py
 
-:: Wait for server to be ready
-echo   等待服务器就绪...
-for /L %%i in (1,1,15) do (
-    timeout /t 1 >nul
-    curl -s http://127.0.0.1:8765/ping >nul 2>&1
-    if not errorlevel 1 (
-        echo   服务器已就绪
-        start http://127.0.0.1:8765/
-        exit /b 0
-    )
-)
+:: 等3秒后打开浏览器
+timeout /t 3 /nobreak >nul
+start http://127.0.0.1:8765/
 
-echo   服务器启动超时，请检查是否被杀毒软件拦截
-pause
+echo   浏览器已打开，如果没看到页面请刷新
